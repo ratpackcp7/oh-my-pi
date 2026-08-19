@@ -12,6 +12,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { getAgentDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { discoverAuthStorage } from "../src/sdk";
@@ -19,8 +21,6 @@ import { buildRoutingSnapshot } from "../src/task/routing/snapshot";
 import type { RoutingIntent } from "../src/task/routing/types";
 import { resolveEffectiveSubagentPolicy } from "../src/task/structured-subagent";
 import type { ToolSession } from "../src/tools";
-import { getAgentDir } from "@oh-my-pi/pi-utils";
-import { YAML } from "bun";
 
 function resolveProbeAgentDir(): string | undefined {
 	const cliIndex = process.argv.indexOf("--agent-dir");
@@ -40,10 +40,12 @@ const resolvedConfigPath = path.join(resolvedAgentDir, "config.yml");
 console.log(`cwd                 : ${process.cwd()}`);
 console.log(`PI_CODING_AGENT_DIR : ${process.env.PI_CODING_AGENT_DIR ?? "(unset)"}`);
 console.log(`PROBE_AGENT_DIR     : ${process.env.PROBE_AGENT_DIR ?? "(unset)"}`);
-console.log(`--agent-dir CLI     : ${(() => {
-	const i = process.argv.indexOf("--agent-dir");
-	return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : "(none)";
-})()}`);
+console.log(
+	`--agent-dir CLI     : ${(() => {
+		const i = process.argv.indexOf("--agent-dir");
+		return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : "(none)";
+	})()}`,
+);
 console.log(`resolved agentDir   : ${resolvedAgentDir}`);
 console.log(`resolved config path: ${resolvedConfigPath}`);
 console.log(`config file exists  : ${fs.existsSync(resolvedConfigPath)}`);
@@ -64,10 +66,16 @@ await modelRegistry.refresh("offline");
 const liveSettings = await Settings.init({ cwd: process.cwd(), agentDir: resolvedAgentDir });
 
 console.log(`liveSettings.getAgentDir(): ${liveSettings.getAgentDir()}`);
-console.log(`live config           : ${liveSettings.get("task.routing.enabled") ? "routing enabled" : "routing DISABLED"}`);
+console.log(
+	`live config           : ${liveSettings.get("task.routing.enabled") ? "routing enabled" : "routing DISABLED"}`,
+);
 console.log(`configured roster     : ${JSON.stringify(liveSettings.get("task.routing.workerModels"))}`);
 console.log(`agentModelOverrides   : ${JSON.stringify(liveSettings.get("task.agentModelOverrides"))}`);
-console.log(`modelRoles keys       : ${Object.keys(liveSettings.get("modelRoles") as Record<string, unknown>).slice(0, 6).join(", ")}... (${Object.keys(liveSettings.get("modelRoles") as Record<string, unknown>).length} total)`);
+console.log(
+	`modelRoles keys       : ${Object.keys(liveSettings.get("modelRoles") as Record<string, unknown>)
+		.slice(0, 6)
+		.join(", ")}... (${Object.keys(liveSettings.get("modelRoles") as Record<string, unknown>).length} total)`,
+);
 console.log(`task.agentModelOverrides isConfigured: ${liveSettings.isConfigured("task.agentModelOverrides")}`);
 
 const ROUTING_KEYS = [
@@ -152,7 +160,9 @@ console.log(`\nparent (Opus) pool    : ${snapshot.parentPool?.label ?? "(unknown
 console.log(`eligible candidates   : ${snapshot.candidates.length} across ${pools.length} pools`);
 console.log(`pools                 : ${pools.join(", ")}`);
 
-console.log("\n## ordinary dispatches, Opus parent, live config (alias-based defaults must remain preferences, not hard pins)");
+console.log(
+	"\n## ordinary dispatches, Opus parent, live config (alias-based defaults must remain preferences, not hard pins)",
+);
 const chosen: { pool?: string; poolKey?: string; selector?: string }[] = [];
 for (const agent of ["scout", "task", "reviewer", "designer"]) {
 	chosen.push(await dispatch(agent, OPUS, undefined));
@@ -186,5 +196,7 @@ console.log(
 
 const externalPools = chosen.filter(entry => entry.pool !== undefined && entry.pool !== snapshot.parentPool?.label);
 console.log(`\nordinary dispatches routed off the parent pool: ${externalPools.length}/${chosen.length}`);
-console.log(`\nProbe demonstrates: @smol/@Contributor/@slow are preferences (preferredRank), not hard pins — scout/task/reviewer all routed off Anthropic parent pool.`);
+console.log(
+	`\nProbe demonstrates: @smol/@Contributor/@slow are preferences (preferredRank), not hard pins — scout/task/reviewer all routed off Anthropic parent pool.`,
+);
 authStorage.close();
