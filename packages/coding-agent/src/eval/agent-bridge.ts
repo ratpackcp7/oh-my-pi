@@ -8,6 +8,7 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentSchemaMode,
 } from "../task/structured-subagent";
+import { resolveParentPoolIdentity, selectorProvider } from "../task/routing/snapshot";
 import type { AgentProgress, SingleResult } from "../task/types";
 import type { NestedRepoPatch } from "../task/worktree";
 import type { ToolSession } from "../tools";
@@ -71,6 +72,14 @@ export interface EvalAgentResult {
 		nestedPatches?: NestedRepoPatch[];
 		changesApplied?: boolean | null;
 		isolationSummary?: string;
+		/** Runtime-owned identity. Never sourced from child prose. */
+		runtime_parent_provider?: string;
+		runtime_parent_model?: string;
+		runtime_parent_usage_pool?: string;
+		runtime_child_requested_model?: string | string[];
+		runtime_child_resolved_provider?: string;
+		runtime_child_resolved_model?: string;
+		runtime_fallback_used: boolean;
 	};
 }
 
@@ -202,6 +211,11 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		const model = result.resolvedModel ?? policy.modelOverride;
 		const nestedPatches = result.nestedPatches?.length ? result.nestedPatches : undefined;
 		const isolationSummary = mergeSummary ? mergeSummary.trim() : undefined;
+		const parentModel = options.session.getActiveModelString?.() ?? options.session.getModelString?.();
+		const parentProvider = parentModel === undefined ? undefined : selectorProvider(parentModel);
+		const parentPool = resolveParentPoolIdentity(options.session);
+		const resolvedModel = result.resolvedModel;
+		const resolvedProvider = resolvedModel === undefined ? undefined : selectorProvider(resolvedModel);
 		return {
 			text,
 			...(hasData ? { data } : {}),
@@ -218,6 +232,13 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				...(result.branchName !== undefined ? { branchName: result.branchName } : {}),
 				...(nestedPatches !== undefined ? { nestedPatches } : {}),
 				...(isolationSummary !== undefined ? { isolationSummary } : {}),
+				...(parentProvider !== undefined ? { runtime_parent_provider: parentProvider } : {}),
+				...(parentModel !== undefined ? { runtime_parent_model: parentModel } : {}),
+				...(parentPool !== undefined ? { runtime_parent_usage_pool: parentPool.key } : {}),
+				...(parsed.model !== undefined ? { runtime_child_requested_model: parsed.model } : {}),
+				...(resolvedProvider !== undefined ? { runtime_child_resolved_provider: resolvedProvider } : {}),
+				...(resolvedModel !== undefined ? { runtime_child_resolved_model: resolvedModel } : {}),
+				runtime_fallback_used: result.resolvedModelIsFallback === true,
 			},
 		};
 	} catch (error) {
