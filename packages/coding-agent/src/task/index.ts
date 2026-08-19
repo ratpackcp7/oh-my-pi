@@ -1536,6 +1536,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				identity: { id: preAllocatedId, label: params.name },
 				...(params.intent !== undefined ? { intent: params.intent } : {}),
 				...(params.routing !== undefined ? { routing: params.routing } : {}),
 				...(params.siblingPools !== undefined ? { siblingPools: params.siblingPools } : {}),
