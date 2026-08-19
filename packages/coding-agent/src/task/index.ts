@@ -688,7 +688,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		} catch {}
 	}
 
-
 	/**
 	 * Resolve the shared policy before detached work exists. The resulting
 	 * policy intentionally stays local: executor dispatch resolves again from
