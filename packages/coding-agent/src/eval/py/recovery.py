@@ -1,6 +1,6 @@
-# Recoverable parallel() overlay.
-# Loaded after prelude.py so it can reuse _AwaitableList and _concurrency_limit
-# without duplicating the rest of the Python helper surface.
+# Recoverable eval-runtime overlay.
+# Loaded after prelude.py so it can reuse the stable bridge/helper primitives
+# without modifying the large base prelude for this narrow repair.
 
 _omp_parallel_last_status = None
 
@@ -94,3 +94,86 @@ def _recoverable_parallel(thunks):
 
 parallel = _recoverable_parallel
 parallel.last = _parallel_last
+
+
+def _runtime_agent(
+    prompt,
+    agent=None,
+    model=None,
+    *,
+    label=None,
+    schema=None,
+    schema_mode=None,
+    isolated=None,
+    apply=None,
+    merge=None,
+    handle=False,
+):
+    """agent() compatibility wrapper that retains host-owned runtime identity on handles."""
+    args = {"prompt": prompt}
+    if agent is not None:
+        args["agent"] = agent
+    if model is not None:
+        args["model"] = model
+    if label is not None:
+        args["label"] = label
+    if schema is not None:
+        args["schema"] = schema
+    if schema_mode is not None:
+        args["schemaMode"] = schema_mode
+    if isolated is not None:
+        args["isolated"] = bool(isolated)
+    if apply is not None:
+        args["apply"] = bool(apply)
+    if merge is not None:
+        args["merge"] = bool(merge)
+    if handle:
+        args["handle"] = True
+
+    res = _bridge_call("__agent__", args)
+    text = res.get("text") if isinstance(res, dict) else res
+    has_data = isinstance(res, dict) and "data" in res
+    parsed = res["data"] if has_data else json.loads(text) if schema is not None else text
+    if not handle:
+        return parsed
+
+    details = res.get("details") if isinstance(res, dict) else None
+    if not isinstance(details, dict) or details.get("id") is None:
+        return {
+            "text": text,
+            "output": text,
+            "handle": None,
+            "id": None,
+            "agent": None,
+        }
+
+    node = {
+        "text": text,
+        "output": text,
+        "handle": f"agent://{details['id']}",
+        "id": details["id"],
+        "agent": details.get("agent"),
+    }
+    if has_data or schema is not None:
+        node["data"] = parsed
+    for src_key, dst_key in (
+        ("isolated", "isolated"),
+        ("patchPath", "patch_path"),
+        ("branchName", "branch_name"),
+        ("nestedPatches", "nested_patches"),
+        ("changesApplied", "changes_applied"),
+        ("isolationSummary", "isolation_summary"),
+        ("runtime_parent_provider", "runtime_parent_provider"),
+        ("runtime_parent_model", "runtime_parent_model"),
+        ("runtime_parent_usage_pool", "runtime_parent_usage_pool"),
+        ("runtime_child_requested_model", "runtime_child_requested_model"),
+        ("runtime_child_resolved_provider", "runtime_child_resolved_provider"),
+        ("runtime_child_resolved_model", "runtime_child_resolved_model"),
+        ("runtime_fallback_used", "runtime_fallback_used"),
+    ):
+        if src_key in details:
+            node[dst_key] = details[src_key]
+    return node
+
+
+agent = _runtime_agent
