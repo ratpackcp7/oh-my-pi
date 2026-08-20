@@ -5,13 +5,12 @@ import MODEL_PRIORITY from "../../priority.json" with { type: "json" };
 import type { ToolSession } from "../../tools";
 import type { TaskRoutingOptions } from "../types";
 import { resolveResourcePool } from "./pool";
-import type { ResourcePoolIdentity, RoutingCandidateInput, RoutingPolicy, RoutingUsageState } from "./types";
+import type { ResourcePoolIdentity, RoutingCandidateInput, RoutingPolicy } from "./types";
 
 /** Intentional worker pattern: must be a concrete provider-qualified selector. Bare aliases like `flash`, `mini`, `pro` are not intentional. */
 function isConcreteWorkerPattern(pattern: string): boolean {
 	const trimmed = pattern.trim();
 	if (!trimmed.length || trimmed.startsWith("@")) return false;
-	// Must contain a slash to be provider-qualified; glob `cursor/*` is intentional (provider-scoped), bare `flash` is not.
 	return trimmed.includes("/");
 }
 
@@ -60,13 +59,11 @@ export function resolveParentPoolIdentity(session: ToolSession): ResourcePoolIde
 }
 
 /**
- * Build routing candidate inputs from the live model registry.
- * Uses only existing helpers: getAvailable, hasConfiguredAuth, getProviderBaseUrl,
- * authStorage.getOAuthAccountIdentity / getCredentialOrigin / getModelUsageHealth,
- * and the parent's active model string. Maps Model capability fields onto the
- * candidate shape. Usage health is resolved via cached/last-good reports only;
- * when nothing is known, emits "unknown" — never triggers network fetches
- * beyond what the cached health already holds (caller should mock health in tests).
+ * Build routing candidate inputs from the live model registry without provider
+ * I/O. The dispatch hot path is intentionally cache/network agnostic: usage is
+ * "unknown" until a dedicated cache-only health API exists. Calling
+ * AuthStorage.getModelUsageHealth() here is unsafe because a cold usage cache
+ * can fetch provider quota endpoints and block task preflight.
  */
 export async function buildRoutingSnapshot(session: ToolSession): Promise<{
 	candidates: RoutingCandidateInput[];
@@ -85,10 +82,6 @@ export async function buildRoutingSnapshot(session: ToolSession): Promise<{
 			return false;
 		}
 	});
-	// Eligibility comes only from intentional worker sources: the explicit roster
-	// and concrete provider-qualified selectors. Broad aliases like `flash`,
-	// `mini`, `pro` are never globally eligible — they would admit stale catalog
-	// models such as `google/gemini-1.5-flash` which no longer exists (404).
 	const intentionalWorkerModels = session.settings.get("task.routing.workerModels").filter(isConcreteWorkerPattern);
 	const concreteModelRoles = Object.values(session.settings.get("modelRoles")).filter(
 		(pattern): pattern is string => typeof pattern === "string" && isConcreteWorkerPattern(pattern),
@@ -97,11 +90,8 @@ export async function buildRoutingSnapshot(session: ToolSession): Promise<{
 		.flat()
 		.filter((pattern): pattern is string => typeof pattern === "string" && isConcreteWorkerPattern(pattern));
 	const intentionalPatterns = [...intentionalWorkerModels, ...concreteModelRoles, ...concreteAgentOverrides];
-	// When no intentional roster is configured, fall back to the curated concrete
-	// priority roster (still provider-qualified, never bare aliases).
 	const eligiblePatterns =
 		intentionalPatterns.length > 0 ? intentionalPatterns : ([...CONCRETE_PRIORITY_ROSTER] as string[]);
-	// Chain order is intentional ranking, so the position of the first match becomes preferredRank.
 	const filtered: Model<Api>[] = [];
 	const rankBySelector = new Map<string, number>();
 	for (const model of filterAvailableModelsByEnabledPatterns(authorized, eligiblePatterns, session.settings)) {
@@ -111,34 +101,9 @@ export async function buildRoutingSnapshot(session: ToolSession): Promise<{
 		filtered.push(model);
 	}
 
-	const reservePct = session.settings.get("retry.usageReservePct");
-	const reserveFraction = Number.isFinite(reservePct) ? reservePct / 100 : 0.1;
-
 	const candidates: RoutingCandidateInput[] = [];
-	// Build candidates with health in parallel, but bounded – available is typically < few hundred
-	const healthResults = await Promise.all(
-		filtered.map(async model => {
-			const baseUrl = modelRegistry.getProviderBaseUrl(model.provider) ?? (model.baseUrl as string | undefined);
-			let usage: RoutingUsageState = "unknown";
-			try {
-				const health = await authStorage.getModelUsageHealth(model.provider, {
-					modelId: model.id,
-					sessionId,
-					baseUrl,
-					reserveFraction,
-				});
-				const state = (health as { state: string }).state;
-				if (state === "healthy" || state === "reserve" || state === "depleted" || state === "unknown") {
-					usage = state as RoutingUsageState;
-				}
-			} catch {
-				usage = "unknown";
-			}
-			return { model, baseUrl, usage };
-		}),
-	);
-
-	for (const { model, baseUrl, usage } of healthResults) {
+	for (const model of filtered) {
+		const baseUrl = modelRegistry.getProviderBaseUrl(model.provider) ?? (model.baseUrl as string | undefined);
 		const identity = authStorage.getOAuthAccountIdentity(model.provider, sessionId);
 		const origin = authStorage.getCredentialOrigin(model.provider);
 		const pool = resolveResourcePool({
@@ -157,7 +122,7 @@ export async function buildRoutingSnapshot(session: ToolSession): Promise<{
 			contextWindow: model.contextWindow ?? null,
 			costPerMTokenTotal: model.cost ? (model.cost.input ?? 0) + (model.cost.output ?? 0) : 0,
 			reasoning: Boolean(model.reasoning),
-			usage,
+			usage: "unknown",
 			preferredRank: rankBySelector.get(selector),
 		});
 	}
