@@ -28,7 +28,11 @@ const MODEL_ABBREV: Record<string, string> = {
 export function abbreviateProvider(provider: string): string {
 	if (PROVIDER_ABBREV[provider]) return PROVIDER_ABBREV[provider];
 	const parts = provider.split(/[-_/]/).filter(Boolean);
-	if (parts.length > 1) return parts.map(p => p[0]?.toUpperCase() ?? "").join("").slice(0, 4);
+	if (parts.length > 1)
+		return parts
+			.map(p => p[0]?.toUpperCase() ?? "")
+			.join("")
+			.slice(0, 4);
 	return provider.slice(0, 3).toUpperCase();
 }
 
@@ -115,7 +119,9 @@ export function progressToLedgerEntry(p: AgentProgress): LedgerEntry {
 	};
 }
 
-export function formatRuntimeModelUsage(entries: Array<{ id: string; resolvedModel?: string; actualModel?: string }>): string {
+export function formatRuntimeModelUsage(
+	entries: Array<{ id: string; resolvedModel?: string; actualModel?: string }>,
+): string {
 	const lines = ["RUNTIME_MODEL_USAGE"];
 	for (const e of entries) {
 		const model = e.actualModel ?? e.resolvedModel ?? "unknown";
@@ -137,7 +143,10 @@ export function detectModelAttributionMismatch(
 	};
 }
 
-export function formatExpandedDetail(p: AgentProgress & { ompVersion?: string }, opts?: { ompVersion?: string }): string {
+export function formatExpandedDetail(
+	p: AgentProgress & { ompVersion?: string },
+	opts?: { ompVersion?: string },
+): string {
 	const lines: string[] = [];
 	lines.push(p.id);
 	lines.push(`agent: ${p.agent}`);
@@ -170,7 +179,11 @@ export function shouldAppendLedgerEntry(prev: LedgerEntry | undefined, next: Led
 	if (prev.selectedModel !== next.selectedModel) return true;
 	if (prev.actualModel !== next.actualModel) return true;
 	if (prev.fallback !== next.fallback) return true;
-	if (prev.status !== next.status && (next.status === "completed" || next.status === "failed" || next.status === "aborted")) return true;
+	if (
+		prev.status !== next.status &&
+		(next.status === "completed" || next.status === "failed" || next.status === "aborted")
+	)
+		return true;
 	const prevReroutes = prev.routingReroutes ?? [];
 	const nextReroutes = next.routingReroutes ?? [];
 	if (prevReroutes.length !== nextReroutes.length) return true;
@@ -194,7 +207,7 @@ export function ledgerPathForSession(sessionFile: string): string {
 }
 
 export async function appendLedgerEntry(ledgerPath: string, entry: LedgerEntry): Promise<void> {
-	const line = ledgerEntryToJsonl(entry) + "\n";
+	const line = `${ledgerEntryToJsonl(entry)}\n`;
 	await fs.mkdir(path.dirname(ledgerPath), { recursive: true });
 	await fs.appendFile(ledgerPath, line, "utf-8");
 }

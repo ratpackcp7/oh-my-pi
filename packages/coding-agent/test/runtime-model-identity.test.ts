@@ -12,11 +12,11 @@ import {
 	formatExpandedDetail,
 	formatRuntimeModelUsage,
 	getOmpVersion,
+	type LedgerEntry,
 	ledgerPathForSession,
 	progressToLedgerEntry,
 	readLedgerEntries,
 	shouldAppendLedgerEntry,
-	type LedgerEntry,
 } from "@oh-my-pi/pi-coding-agent/task/subagent-ledger";
 import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/types";
 
@@ -27,7 +27,6 @@ beforeAll(async () => {
 function makeProgress(overrides: Partial<AgentProgress> & { id: string }): AgentProgress {
 	return {
 		index: 0,
-		id: overrides.id,
 		agent: "task",
 		agentSource: "bundled",
 		status: "running",
@@ -143,10 +142,7 @@ describe("SPEC runtime model identity RED", () => {
 	});
 
 	it("6. conflicting prose claim yields MODEL_ATTRIBUTION_MISMATCH and preserves runtime truth", () => {
-		const result = detectModelAttributionMismatch(
-			"claude-3-7-sonnet",
-			"google-antigravity/gemini-3.7-flash",
-		);
+		const result = detectModelAttributionMismatch("claude-3-7-sonnet", "google-antigravity/gemini-3.7-flash");
 		expect(result.mismatch).toBe(true);
 		expect(result.warning).toContain("MODEL_ATTRIBUTION_MISMATCH");
 		expect(result.authoritative).toBe("google-antigravity/gemini-3.7-flash");

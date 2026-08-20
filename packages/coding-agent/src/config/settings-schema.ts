@@ -4792,7 +4792,7 @@ export const SETTINGS_SCHEMA = {
 	// routing as a preference so ordinary capabilities stay dynamically routable.
 	"task.routing.enabled": {
 		type: "boolean",
-		default: true,
+		default: false,
 		description: "Enable dynamic worker routing for task subagents (parent-pool aware selection)",
 	},
 	"task.routing.avoidParentPool": {
