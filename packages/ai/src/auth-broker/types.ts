@@ -13,7 +13,13 @@ import type {
 	DisabledCredentialSummary,
 	StoredCredentialBlock,
 } from "../auth-storage";
-import type { ClientUsageClientSummary, ClientUsageReport, UsageHistoryEntry, UsageReport } from "../usage";
+import type {
+	ClientUsageClientSummary,
+	ClientUsageReport,
+	UsageHistoryEntry,
+	UsageProviderHealth,
+	UsageReport,
+} from "../usage";
 
 /** GET /v1/healthz response body. */
 export interface HealthzResponse {
@@ -46,6 +52,8 @@ export interface SnapshotResponse extends Omit<AuthCredentialSnapshot, "credenti
 export interface UsageResponse {
 	generatedAt: number;
 	reports: UsageReport[];
+	/** Per-provider usage-fetch telemetry (see `AuthStorage.getUsageHealth`). Absent on brokers that predate this field. */
+	health?: UsageProviderHealth[];
 }
 
 /**

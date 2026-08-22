@@ -693,8 +693,11 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						// large and unstable. Everything UI-relevant lives in `limits` and
 						// `metadata`.
 						const trimmed = reports.map(({ raw: _raw, ...rest }) => rest);
+						// Health is in-memory telemetry from the fetch above, not a separate
+						// upstream call — secret-free (timestamps + a fixed error code only).
+						const health = opts.storage.getUsageHealth();
 						logger.info("auth-broker usage served", { peer, reports: trimmed.length });
-						return json(200, { generatedAt: Date.now(), reports: trimmed });
+						return json(200, { generatedAt: Date.now(), reports: trimmed, ...(health.length > 0 ? { health } : {}) });
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
 						logger.warn("auth-broker usage fetch failed", { peer, error: message });

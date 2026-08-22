@@ -5,6 +5,7 @@
  * and shared quotas across providers.
  */
 import { type } from "@oh-my-pi/omptype";
+import { ProviderHttpError } from "./error/classes";
 import type { FetchImpl, Provider } from "./types";
 export type UsageUnit = "percent" | "tokens" | "requests" | "usd" | "minutes" | "bytes" | "unknown";
 
@@ -341,6 +342,109 @@ export interface UsageProvider {
 	validatesCredentials?: boolean;
 	/** Whether a failed refresh may serve the previous successful report. Defaults to true. */
 	retainLastGoodOnFailure?: boolean;
+}
+
+// ─── Usage-fetch health telemetry ──────────────────────────────────────────
+
+/**
+ * Secret-free failure classification for one usage-fetch attempt.
+ * `rate_limited` and `reauth_required` are definitive (upstream told us
+ * why); `provider_unreachable` covers network/timeout failures below the
+ * HTTP layer; `unknown` is the fallback when a provider reports failure
+ * (`null`) without either.
+ */
+export type UsageHealthErrorCode = "rate_limited" | "reauth_required" | "provider_unreachable" | "unknown";
+
+/**
+ * Per-provider usage-fetch telemetry. Safe to serialize onto the broker wire:
+ * it never carries tokens, account identifiers, or raw upstream error text —
+ * only timestamps and a fixed error code.
+ */
+export interface UsageProviderHealth {
+	provider: Provider;
+	/** Timestamp of the most recent poll attempt, successful or not. */
+	lastAttemptAt: number;
+	/** Timestamp of the most recent poll that returned a usable report. Survives later failures. */
+	lastSuccessfulAt?: number;
+	/** Absent while the provider is healthy (i.e. the most recent poll succeeded). */
+	errorCode?: UsageHealthErrorCode;
+	/** Set only when upstream said when to retry (e.g. a 429 `Retry-After`). */
+	nextAllowedAt?: number;
+}
+
+/** Secret-free classification of one failed usage-fetch attempt, observed at the transport boundary. */
+export interface UsageFetchFailure {
+	errorCode: UsageHealthErrorCode;
+	nextAllowedAt?: number;
+}
+
+function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
+	if (!value?.trim()) return undefined;
+	const seconds = Number.parseFloat(value);
+	if (Number.isFinite(seconds)) return Date.now() + Math.max(0, seconds * 1000);
+	const dateMs = Date.parse(value);
+	return Number.isFinite(dateMs) ? dateMs : undefined;
+}
+
+/**
+ * Classify a raw usage-fetch HTTP response into a secret-free failure, or
+ * `undefined` when it looks healthy. Reads only the status and the
+ * `retry-after` header — never the body, which upstream error payloads have
+ * been observed to echo request bearer material into.
+ */
+export function classifyUsageFetchResponse(response: Response): UsageFetchFailure | undefined {
+	if (response.ok) return undefined;
+	if (response.status === 429) {
+		const nextAllowedAt = parseRetryAfterHeader(response.headers.get("retry-after"));
+		return nextAllowedAt === undefined ? { errorCode: "rate_limited" } : { errorCode: "rate_limited", nextAllowedAt };
+	}
+	if (response.status === 401 || response.status === 403) return { errorCode: "reauth_required" };
+	return { errorCode: "unknown" };
+}
+
+/**
+ * Classify a thrown usage-fetch error into a secret-free failure. A
+ * `ProviderHttpError` carries a real HTTP status (thrown by providers that
+ * don't swallow failures); anything else — network failure, abort, timeout —
+ * is `provider_unreachable`. Never inspects `error.message`: some upstreams
+ * echo request bearer material back into error bodies.
+ */
+export function classifyUsageFetchThrow(error: unknown): UsageFetchFailure {
+	if (error instanceof ProviderHttpError) {
+		if (error.status === 429) {
+			const nextAllowedAt = parseRetryAfterHeader(error.headers?.get("retry-after"));
+			return nextAllowedAt === undefined
+				? { errorCode: "rate_limited" }
+				: { errorCode: "rate_limited", nextAllowedAt };
+		}
+		if (error.status === 401 || error.status === 403) return { errorCode: "reauth_required" };
+		return { errorCode: "unknown" };
+	}
+	return { errorCode: "provider_unreachable" };
+}
+
+/**
+ * Wrap a `usageFetch` implementation so every response or thrown error it
+ * produces is classified and handed to `onObservation` before being returned
+ * (or rethrown) unchanged. Some `UsageProvider`s (e.g. Claude's) deliberately
+ * swallow HTTP failures and resolve `null` instead of throwing, so the
+ * transport-level status never reaches the caller through the return value —
+ * this is the seam that recovers it without changing provider behavior.
+ */
+export function observeUsageFetch(
+	inner: FetchImpl,
+	onObservation: (failure: UsageFetchFailure | undefined) => void,
+): FetchImpl {
+	return (async (input: string | URL | Request, init?: RequestInit) => {
+		try {
+			const response = await inner(input, init);
+			onObservation(classifyUsageFetchResponse(response));
+			return response;
+		} catch (error) {
+			onObservation(classifyUsageFetchThrow(error));
+			throw error;
+		}
+	}) as FetchImpl;
 }
 
 /** Request context used when ranking usage for a specific model. */

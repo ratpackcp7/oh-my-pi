@@ -78,13 +78,15 @@ omp auth-broker status    [--json]
 | `GET`    | `/v1/credentials/disabled`   | bearer | List disabled credentials; optional `provider` query filter        |
 | `POST`   | `/v1/credential/:id/block`   | bearer | Upsert a provider/scope rate-limit block                           |
 | `DELETE` | `/v1/credential/:id/blocks`  | bearer | Delete all rate-limit blocks for a credential                      |
-| `GET`    | `/v1/usage`                  | bearer | Aggregate current `UsageReport[]` across credentials               |
+| `GET`    | `/v1/usage`                  | bearer | Aggregate current `UsageReport[]` across credentials, plus optional per-provider `health` telemetry |
 | `GET`    | `/v1/usage/history`          | bearer | Persisted usage history; optional `sinceMs` and `provider` filters |
 | `POST`   | `/v1/usage/observed`         | bearer | Record usage observed by a broker client                           |
 | `GET`    | `/v1/usage/clients`          | bearer | Summarize client-observed usage since optional `sinceMs`           |
 | `POST`   | `/v1/usage/stale`            | bearer | Invalidate the broker's current usage cache                        |
 
 Requests use `Authorization: Bearer <token>`. The server compares against an in-memory token allow-list; the gateway’s implementation uses a timing-safe comparison.
+
+`GET /v1/usage` responses may include an optional `health: UsageProviderHealth[]` array, one entry per polled provider: `lastAttemptAt` (every poll), `lastSuccessfulAt` (successful polls only — survives later failures), and while unhealthy `errorCode` (`rate_limited` | `reauth_required` | `provider_unreachable` | `unknown`) plus `nextAllowedAt` (only when upstream gave a retry time, e.g. a 429 `Retry-After`). It's in-memory telemetry sourced from `AuthStorage.getUsageHealth()` — never persisted, never carries credential material.
 
 #### Conditional snapshot long polling
 

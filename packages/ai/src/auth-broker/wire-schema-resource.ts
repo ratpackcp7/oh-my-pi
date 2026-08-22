@@ -290,6 +290,20 @@ function buildAuthBrokerWireSchemas(): AuthBrokerWireSchemas {
 	});
 
 	/**
+	 * Per-provider usage-fetch telemetry (see `AuthStorage.getUsageHealth`).
+	 * Secret-free: only timestamps and a fixed error code, never credential
+	 * material or raw upstream error text.
+	 */
+	const usageProviderHealthSchema = type({
+		"+": "reject",
+		provider: "string",
+		lastAttemptAt: "number",
+		"lastSuccessfulAt?": "number",
+		"errorCode?": "'rate_limited' | 'reauth_required' | 'provider_unreachable' | 'unknown'",
+		"nextAllowedAt?": "number",
+	});
+
+	/**
 	 * Broker `/v1/usage` response. Reports are full {@link UsageReport}s minus the
 	 * heavy provider-specific `raw` field (the server strips it before send) — we
 	 * keep `raw` optional in the underlying schema so a misconfigured broker that
@@ -299,6 +313,7 @@ function buildAuthBrokerWireSchemas(): AuthBrokerWireSchemas {
 		"+": "reject",
 		generatedAt: "number",
 		reports: arkUsageReportSchema.array(),
+		"health?": usageProviderHealthSchema.array(),
 	});
 
 	const usageHistoryEntrySchema = type({

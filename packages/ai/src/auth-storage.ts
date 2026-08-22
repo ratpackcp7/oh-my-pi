@@ -38,15 +38,17 @@ import type {
 	ObservedUsageEntry,
 	UsageCredential,
 	UsageFetchContext,
+	UsageFetchFailure,
 	UsageFetchParams,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 	UsageLimit,
 	UsageLogger,
 	UsageProvider,
+	UsageProviderHealth,
 	UsageReport,
 } from "./usage";
-import { resolveUsedFraction } from "./usage";
+import { classifyUsageFetchThrow, observeUsageFetch, resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { cursorUsageProvider } from "./usage/cursor";
@@ -1296,6 +1298,8 @@ export class AuthStorage {
 	#usageRequestInFlight: Map<string, Promise<UsageReport | null>> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
+	/** Per-provider usage-fetch telemetry (see {@link AuthStorage.getUsageHealth}); in-memory only, not persisted. */
+	#usageHealth: Map<Provider, UsageProviderHealth> = new Map();
 	#usageFetch: typeof fetch;
 	#usageRequestTimeoutMs: number;
 	#usageLogger?: UsageLogger;
@@ -3232,9 +3236,15 @@ export class AuthStorage {
 
 		if (providerImpl.supports && !providerImpl.supports(params)) return null;
 
+		const attemptedAt = Date.now();
+		let observedFailure: UsageFetchFailure | undefined;
+		const observedFetch = observeUsageFetch(this.#usageFetch, failure => {
+			observedFailure = failure;
+		});
+
 		try {
 			const report = await providerImpl.fetchUsage(params, {
-				fetch: this.#usageFetch,
+				fetch: observedFetch,
 				logger: this.#usageLogger,
 			});
 			// Attribute the report to the credential's organization. The orgId and
@@ -3255,9 +3265,29 @@ export class AuthStorage {
 					};
 				}
 			}
+			if (report) {
+				this.#recordUsageHealth(request.provider, attemptedAt, { success: true });
+			} else {
+				// The provider swallowed a transport failure into `null` (Claude's
+				// usage endpoint never throws for 4xx/429 — see usage/claude.ts):
+				// `observedFailure`, captured at the fetch we handed it, is the only
+				// place that status survives. `unknown` covers a healthy transport
+				// that still yielded no usable usage data (e.g. an empty payload).
+				const failure = observedFailure ?? { errorCode: "unknown" as const };
+				this.#recordUsageHealth(request.provider, attemptedAt, { success: false, failure });
+				if (failure.errorCode === "reauth_required") {
+					// Definitive auth failure (revoked key, lapsed subscription): purge
+					// the last-good report so #fetchUsageCached's failure branch can't
+					// keep rendering and ranking from stale quota the way it does for
+					// transient failures. Mirrors the definitive-OAuth-refresh path.
+					this.#usageCache.set(this.#buildUsageReportCacheKey(request), { value: null, expiresAt: 0 });
+				}
+			}
 			return report;
 		} catch (error) {
-			if (error instanceof AIError.ProviderHttpError && (error.status === 401 || error.status === 403)) {
+			const failure = observedFailure ?? classifyUsageFetchThrow(error);
+			this.#recordUsageHealth(request.provider, attemptedAt, { success: false, failure });
+			if (failure.errorCode === "reauth_required") {
 				// Definitive auth failure (revoked key, lapsed subscription): purge
 				// the last-good report so #fetchUsageCached's failure branch can't
 				// keep rendering and ranking from stale quota the way it does for
@@ -3812,6 +3842,38 @@ export class AuthStorage {
 	 */
 	usageProviderFor(provider: Provider): UsageProvider | undefined {
 		return this.#usageProviderResolver?.(provider);
+	}
+
+	/**
+	 * Per-provider usage-fetch telemetry: one entry per provider that has been
+	 * polled by this `AuthStorage` instance, with `lastAttemptAt` (every poll),
+	 * `lastSuccessfulAt` (successful polls only; survives later failures) and,
+	 * while unhealthy, `errorCode`/`nextAllowedAt`. In-memory and process-local
+	 * — never persisted, never carries credential material. Broker `/v1/usage`
+	 * surfaces these as the response's optional `health` field.
+	 */
+	getUsageHealth(): UsageProviderHealth[] {
+		return Array.from(this.#usageHealth.values());
+	}
+
+	/**
+	 * Record the outcome of one usage-fetch attempt for `provider`. Failures
+	 * never clear `lastSuccessfulAt`; only a later success does (and clears
+	 * `errorCode`/`nextAllowedAt` with it).
+	 */
+	#recordUsageHealth(
+		provider: Provider,
+		attemptedAt: number,
+		outcome: { success: true } | { success: false; failure: UsageFetchFailure },
+	): void {
+		const previous = this.#usageHealth.get(provider);
+		this.#usageHealth.set(provider, {
+			provider,
+			lastAttemptAt: attemptedAt,
+			lastSuccessfulAt: outcome.success ? attemptedAt : previous?.lastSuccessfulAt,
+			errorCode: outcome.success ? undefined : outcome.failure.errorCode,
+			nextAllowedAt: outcome.success ? undefined : outcome.failure.nextAllowedAt,
+		});
 	}
 
 	/**
