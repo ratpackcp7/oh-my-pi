@@ -752,6 +752,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// job manager may observe a batch unless every effective policy is valid.
 		// Sequential preflights ensure sibling diversity: each spawn's routing sees pools chosen for earlier siblings.
 		const siblingPoolKeysForBatch: string[] = [...this.#siblingPoolKeys];
+		const selectedPoolKeysForBatch: string[] = [];
 		const preflightResults: Array<{ policy?: EffectiveSubagentPolicy; error?: string }> = [];
 		for (let i = 0; i < normalizedSpawnParams.length; i++) {
 			const spawn = normalizedSpawnParams[i]!;
@@ -762,8 +763,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const poolKey = policy.routingPoolKey ?? policy.routingDecision?.pool.key;
 				if (poolKey) {
 					siblingPoolKeysForBatch.push(poolKey);
-					this.#siblingPoolKeys.push(poolKey);
-					if (this.#siblingPoolKeys.length > 20) this.#siblingPoolKeys.shift();
+					selectedPoolKeysForBatch.push(poolKey);
 				}
 			} catch (error) {
 				preflightResults.push({ error: error instanceof StructuredSubagentError ? error.message : String(error) });
@@ -785,6 +785,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					})
 					.join("\n"),
 			);
+		}
+		// Persist sibling routing history only after the complete batch passes preflight.
+		for (const poolKey of selectedPoolKeysForBatch) {
+			this.#siblingPoolKeys.push(poolKey);
+			if (this.#siblingPoolKeys.length > 20) this.#siblingPoolKeys.shift();
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);

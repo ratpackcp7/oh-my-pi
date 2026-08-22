@@ -78,6 +78,7 @@ function session(overrides: Record<string, unknown> = {}): ToolSession {
 	const settings = Settings.isolated({
 		"task.isolation.mode": "none",
 		"task.enableLsp": false,
+		"task.routing.enabled": true,
 		...overrides,
 	} as Record<string, unknown>);
 	return {

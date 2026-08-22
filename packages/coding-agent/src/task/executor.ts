@@ -62,6 +62,14 @@ import type { WorkspaceTree } from "../workspace-tree";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
+import {
+	appendLedgerEntry,
+	getOmpVersion,
+	type LedgerEntry,
+	ledgerPathForSession,
+	progressToLedgerEntry,
+	shouldAppendLedgerEntry,
+} from "./subagent-ledger";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
@@ -1266,7 +1274,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const PROGRESS_COALESCE_MS = 150;
 	let lastProgressEmitMs = 0;
 	let progressTimeoutId: NodeJS.Timeout | null = null;
-	let lastLedgerEntry: import("./subagent-ledger").LedgerEntry | undefined;
+	let lastLedgerEntry: LedgerEntry | undefined;
 	// Recompute progress.recentOutput from the capped tail. Deferred: text_delta
 	// appends only extend the tail and mark it dirty; the (up to 8KB) split/filter
 	// runs synchronously here, immediately before the ONLY places the progress
@@ -1306,13 +1314,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			const snapshot = { ...progress } as typeof progress;
 			void (async () => {
 				try {
-					const { progressToLedgerEntry, ledgerPathForSession, appendLedgerEntry, shouldAppendLedgerEntry } = await import("./subagent-ledger");
 					const entry = progressToLedgerEntry(snapshot);
 					if (shouldAppendLedgerEntry(lastLedgerEntry, entry)) {
 						await appendLedgerEntry(ledgerPathForSession(args.sessionFile as string), entry);
 						lastLedgerEntry = entry;
 					}
-				} catch {}
+				} catch (error) {
+					logger.debug("Subagent ledger append failed", {
+						id,
+						sessionFile: args.sessionFile,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			})();
 		}
 		lastProgressEmitMs = Date.now();
@@ -2966,6 +2979,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			checkAbort();
 
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
+			// Capture the requested/selected route before auth fallback can substitute the parent model.
+			const selectedResolution = resolveModelOverride(modelPatterns, modelRegistry, settings);
 			const inheritedRetryFallbackChain =
 				configuredModelPatterns.length === 1
 					? resolveSubagentInheritedRetryFallbackChain(
@@ -3031,21 +3046,31 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
+			if (selectedResolution.model) {
+				const selectedEffortLevel =
+					options.effort !== undefined
+						? resolveTaskEffortLevel(selectedResolution.model, options.effort, spawnEffortCeiling)
+						: undefined;
+				const selectedDisplayLevel =
+					selectedEffortLevel ??
+					(selectedResolution.explicitThinkingLevel ? selectedResolution.thinkingLevel : undefined);
+				progress.selectedModel =
+					selectedDisplayLevel !== undefined
+						? formatModelSelectorValue(
+								formatModelStringWithRouting(selectedResolution.model),
+								selectedDisplayLevel,
+							)
+						: formatModelStringWithRouting(selectedResolution.model);
+			}
 			if (model) {
 				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
 				progress.resolvedModel =
 					displayLevel !== undefined
 						? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
 						: formatModelStringWithRouting(model);
-				// Preserve selected before any runtime fallback
-				if (!progress.selectedModel) progress.selectedModel = progress.resolvedModel;
+				progress.selectedModel ??= progress.resolvedModel;
 				progress.parentModel = options.parentActiveModelPattern;
-				try {
-					const { getOmpVersion } = await import("./subagent-ledger");
-					progress.ompVersion = getOmpVersion();
-				} catch {
-					progress.ompVersion = "unknown";
-				}
+				progress.ompVersion = getOmpVersion();
 			}
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.

@@ -1,3 +1,6 @@
+import * as fs from "node:fs/promises";
+import path from "node:path";
+import { VERSION } from "@oh-my-pi/pi-utils";
 import type { AgentProgress } from "./types";
 
 const PROVIDER_ABBREV: Record<string, string> = {
@@ -24,15 +27,17 @@ const MODEL_ABBREV: Record<string, string> = {
 
 export function abbreviateProvider(provider: string): string {
 	if (PROVIDER_ABBREV[provider]) return PROVIDER_ABBREV[provider];
-	// fallback: first 3 upper chars of initials
 	const parts = provider.split(/[-_/]/).filter(Boolean);
-	if (parts.length > 1) return parts.map(p => p[0]?.toUpperCase() ?? "").join("").slice(0, 4);
+	if (parts.length > 1)
+		return parts
+			.map(p => p[0]?.toUpperCase() ?? "")
+			.join("")
+			.slice(0, 4);
 	return provider.slice(0, 3).toUpperCase();
 }
 
 export function abbreviateModel(modelId: string): string {
 	if (MODEL_ABBREV[modelId]) return MODEL_ABBREV[modelId];
-	// heuristic: version + initials
 	const versionMatch = modelId.match(/(\d+(?:\.\d+)+)/);
 	const version = versionMatch ? versionMatch[1] : "";
 	const tokens = modelId.split(/[-_]/).filter(t => !/^\d/.test(t) && t.length > 0);
@@ -45,7 +50,6 @@ export function abbreviateModel(modelId: string): string {
 }
 
 export function compactModelIdentity(resolved: string): string {
-	// format: provider/model[:effort] -> PROV·MODEL·effort
 	const slashIdx = resolved.indexOf("/");
 	let provider = "";
 	let rest = resolved;
@@ -69,20 +73,8 @@ export function compactModelIdentity(resolved: string): string {
 	return parts.join("·");
 }
 
-
-let cachedOmpVersion: string | undefined;
 export function getOmpVersion(): string {
-	if (cachedOmpVersion) return cachedOmpVersion;
-	try {
-		// eslint-disable-next-line @typescript-eslint/no-require-imports
-		const pkg = require("../../package.json") as { version?: string };
-		if (pkg.version) {
-			cachedOmpVersion = pkg.version;
-			return cachedOmpVersion;
-		}
-	} catch {}
-	cachedOmpVersion = "unknown";
-	return cachedOmpVersion;
+	return VERSION;
 }
 
 function extractEffort(model?: string): string | undefined {
@@ -127,16 +119,21 @@ export function progressToLedgerEntry(p: AgentProgress): LedgerEntry {
 	};
 }
 
-export function formatRuntimeModelUsage(entries: Array<{ id: string; resolvedModel?: string; actualModel?: string }>): string {
+export function formatRuntimeModelUsage(
+	entries: Array<{ id: string; resolvedModel?: string; actualModel?: string }>,
+): string {
 	const lines = ["RUNTIME_MODEL_USAGE"];
 	for (const e of entries) {
-		const model = (e as { actualModel?: string }).actualModel ?? e.resolvedModel ?? "unknown";
+		const model = e.actualModel ?? e.resolvedModel ?? "unknown";
 		lines.push(`- ${e.id} -> ${model}`);
 	}
 	return lines.join("\n");
 }
 
-export function detectModelAttributionMismatch(proseModel: string, runtimeModel: string): { mismatch: boolean; warning: string; authoritative: string } {
+export function detectModelAttributionMismatch(
+	proseModel: string,
+	runtimeModel: string,
+): { mismatch: boolean; warning: string; authoritative: string } {
 	const norm = (s: string) => s.trim().toLowerCase();
 	const mismatch = norm(proseModel) !== norm(runtimeModel);
 	return {
@@ -146,7 +143,10 @@ export function detectModelAttributionMismatch(proseModel: string, runtimeModel:
 	};
 }
 
-export function formatExpandedDetail(p: AgentProgress & { ompVersion?: string }, opts?: { ompVersion?: string }): string {
+export function formatExpandedDetail(
+	p: AgentProgress & { ompVersion?: string },
+	opts?: { ompVersion?: string },
+): string {
 	const lines: string[] = [];
 	lines.push(p.id);
 	lines.push(`agent: ${p.agent}`);
@@ -157,19 +157,19 @@ export function formatExpandedDetail(p: AgentProgress & { ompVersion?: string },
 	if (p.routingReroutes?.length) {
 		lines.push(`fallbacks: ${p.routingReroutes.map(r => `${r.from} -> ${r.to}`).join(", ")}`);
 	} else if (p.resolvedModelIsFallback) {
-		lines.push(`fallbacks: fallback active`);
+		lines.push("fallbacks: fallback active");
 	}
 	if (p.routingReason) lines.push(`routing: ${p.routingReason}`);
-	lines.push(`revision: unavailable`);
+	lines.push("revision: unavailable");
 	const ver = p.ompVersion ?? opts?.ompVersion ?? getOmpVersion();
 	lines.push(`ompVersion: ${ver}`);
 	return lines.join("\n");
 }
 
-// JSONL ledger helpers (machine-owned, never LLM-authored)
 export function ledgerEntryToJsonl(entry: LedgerEntry): string {
 	return JSON.stringify(entry);
 }
+
 export function parseLedgerJsonl(line: string): LedgerEntry {
 	return JSON.parse(line) as LedgerEntry;
 }
@@ -179,7 +179,11 @@ export function shouldAppendLedgerEntry(prev: LedgerEntry | undefined, next: Led
 	if (prev.selectedModel !== next.selectedModel) return true;
 	if (prev.actualModel !== next.actualModel) return true;
 	if (prev.fallback !== next.fallback) return true;
-	if (prev.status !== next.status && (next.status === "completed" || next.status === "failed" || next.status === "aborted")) return true;
+	if (
+		prev.status !== next.status &&
+		(next.status === "completed" || next.status === "failed" || next.status === "aborted")
+	)
+		return true;
 	const prevReroutes = prev.routingReroutes ?? [];
 	const nextReroutes = next.routingReroutes ?? [];
 	if (prevReroutes.length !== nextReroutes.length) return true;
@@ -192,28 +196,29 @@ export function shouldAppendLedgerEntry(prev: LedgerEntry | undefined, next: Led
 	return false;
 }
 
+/**
+ * Keep machine ledgers out of the `*.jsonl` namespace used by persisted
+ * subagent transcript discovery. NDJSON is still line-delimited JSON, but it
+ * cannot be mistaken for an Agent Hub transcript by the existing scanners.
+ */
 export function ledgerPathForSession(sessionFile: string): string {
-	// e.g. /tmp/session.jsonl -> /tmp/session.ledger.jsonl
-	if (sessionFile.endsWith(".jsonl")) return sessionFile.replace(/\.jsonl$/, ".ledger.jsonl");
-	return `${sessionFile}.ledger.jsonl`;
+	if (sessionFile.endsWith(".jsonl")) return sessionFile.replace(/\.jsonl$/, ".ledger.ndjson");
+	return `${sessionFile}.ledger.ndjson`;
 }
 
 export async function appendLedgerEntry(ledgerPath: string, entry: LedgerEntry): Promise<void> {
-	const line = ledgerEntryToJsonl(entry) + "\n";
-	const { mkdir, appendFile } = await import("node:fs/promises");
-	const { dirname } = await import("node:path");
-	await mkdir(dirname(ledgerPath), { recursive: true });
-	await appendFile(ledgerPath, line, "utf-8");
+	const line = `${ledgerEntryToJsonl(entry)}\n`;
+	await fs.mkdir(path.dirname(ledgerPath), { recursive: true });
+	await fs.appendFile(ledgerPath, line, "utf-8");
 }
 
 export async function readLedgerEntries(ledgerPath: string): Promise<LedgerEntry[]> {
 	try {
-		const { readFile } = await import("node:fs/promises");
-		const content = await readFile(ledgerPath, "utf-8");
+		const content = await fs.readFile(ledgerPath, "utf-8");
 		return content
 			.split("\n")
 			.filter(Boolean)
-			.map(l => parseLedgerJsonl(l));
+			.map(line => parseLedgerJsonl(line));
 	} catch {
 		return [];
 	}

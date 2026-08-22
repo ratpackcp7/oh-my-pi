@@ -52,8 +52,8 @@ import {
 	prompt,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
-import { compactModelIdentity } from "../task/subagent-ledger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { reset as resetCapabilities } from "../capability";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
@@ -117,6 +117,7 @@ import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { formatTaskId } from "../task/render";
+import { compactModelIdentity } from "../task/subagent-ledger";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
@@ -484,7 +485,10 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${modelSuffix}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				if (description) {
-					const budget = Math.max(TRUNCATE_LENGTHS.SHORT, columns - visibleWidth(displayId) - visibleWidth(resolved ?? "") - 14);
+					const budget = Math.max(
+						TRUNCATE_LENGTHS.SHORT,
+						columns - visibleWidth(displayId) - visibleWidth(resolved ?? "") - 14,
+					);
 					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(replaceTabs(description), budget))}`;
 				} else {
 					const taskPreview = session.progress?.task?.trim();

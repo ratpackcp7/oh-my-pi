@@ -53,7 +53,7 @@ try {
 	const rawText = fs.readFileSync(resolvedConfigPath, "utf8");
 	const raw = YAML.parse(rawText) as Record<string, unknown>;
 	console.log(`raw task.agentModelOverrides (flat): ${JSON.stringify(raw["task.agentModelOverrides"])}`);
-	const taskNested = (raw["task"] as Record<string, unknown> | undefined)?.["agentModelOverrides"];
+	const taskNested = (raw.task as Record<string, unknown> | undefined)?.agentModelOverrides;
 	console.log(`raw task.agentModelOverrides (nested task.agentModelOverrides): ${JSON.stringify(taskNested)}`);
 } catch (e) {
 	console.log(`raw read error: ${String(e)}`);
