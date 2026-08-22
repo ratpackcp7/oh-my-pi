@@ -187,7 +187,7 @@ describe("SPEC runtime model identity RED", () => {
 	it("10. compact abbreviations for all required providers", () => {
 		expect(compactModelIdentity("google-antigravity/gemini-3.7-flash:high")).toBe("AGY·G3.7F·high");
 		expect(compactModelIdentity("meta/muse-spark-1.2-contributor")).toBe("META·MS1.2");
-		expect(compactModelIdentity("openai-codex/gpt-5.6-sol")).toBe("OAI·G5.6S");
+		expect(compactModelIdentity("openai-codex/gpt-5.6-sol")).toBe("OC·G5.6S");
 		expect(compactModelIdentity("cursor/grok-4.6")).toBe("CUR·G4.6");
 	});
 
@@ -195,7 +195,7 @@ describe("SPEC runtime model identity RED", () => {
 		const cases: Array<[string, string]> = [
 			["google-antigravity/gemini-3.7-flash:high", "AGY·G3.7F·high"],
 			["meta/muse-spark-1.2-contributor", "META·MS1.2"],
-			["openai-codex/gpt-5.6-sol", "OAI·G5.6S"],
+			["openai-codex/gpt-5.6-sol", "OC·G5.6S"],
 			["cursor/grok-4.6", "CUR·G4.6"],
 		];
 		for (const [model, compact] of cases) {

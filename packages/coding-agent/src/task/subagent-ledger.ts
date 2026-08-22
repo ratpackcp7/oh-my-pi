@@ -8,7 +8,7 @@ const PROVIDER_ABBREV: Record<string, string> = {
 	google: "GOOG",
 	anthropic: "ANT",
 	meta: "META",
-	"openai-codex": "OAI",
+	"openai-codex": "OC",
 	openai: "OAI",
 	cursor: "CUR",
 	zai: "ZAI",
