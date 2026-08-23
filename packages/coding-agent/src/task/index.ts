@@ -1541,6 +1541,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				// `name` is the spawn handle: keep it for id allocation when this
+				// path did not pre-reserve one. Do not treat it as a HUD description.
 				identity: { id: preAllocatedId, label: params.name },
 				...(params.intent !== undefined ? { intent: params.intent } : {}),
 				...(params.routing !== undefined ? { routing: params.routing } : {}),

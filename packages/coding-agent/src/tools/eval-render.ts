@@ -584,6 +584,10 @@ export const evalToolRenderer = {
 			warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;
 		}
 		const noticeLine = details?.notice ? uiTheme.fg("dim", wrapBrackets(details.notice, uiTheme)) : undefined;
+		const asyncLine =
+			details?.async?.state === "running"
+				? uiTheme.fg("dim", wrapBrackets(`Backgrounded: ${details.async.jobId}`, uiTheme))
+				: undefined;
 
 		const cellResults = details?.cells;
 		if (cellResults && cellResults.length > 0) {
@@ -668,6 +672,9 @@ export const evalToolRenderer = {
 					if (noticeLine) {
 						lines.push(noticeLine);
 					}
+					if (asyncLine) {
+						lines.push(asyncLine);
+					}
 					if (warningLine) {
 						lines.push(warningLine);
 					}
@@ -691,14 +698,19 @@ export const evalToolRenderer = {
 		);
 
 		if (!combinedOutput && statusLines.length === 0) {
-			const lines = [timeoutLine, noticeLine, warningLine].filter(Boolean) as string[];
+			const lines = [timeoutLine, noticeLine, asyncLine, warningLine].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
 		if (!combinedOutput && statusLines.length > 0) {
-			const lines = [uiTheme.fg("dim", "Status"), ...statusLines, timeoutLine, noticeLine, warningLine].filter(
-				Boolean,
-			) as string[];
+			const lines = [
+				uiTheme.fg("dim", "Status"),
+				...statusLines,
+				timeoutLine,
+				noticeLine,
+				asyncLine,
+				warningLine,
+			].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
@@ -712,6 +724,7 @@ export const evalToolRenderer = {
 				...(statusLines.length > 0 ? [uiTheme.fg("dim", "Status"), ...statusLines] : []),
 				timeoutLine,
 				noticeLine,
+				asyncLine,
 				warningLine,
 			].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
@@ -762,6 +775,9 @@ export const evalToolRenderer = {
 				}
 				if (noticeLine) {
 					outputLines.push(truncateToWidth(noticeLine, width));
+				}
+				if (asyncLine) {
+					outputLines.push(truncateToWidth(asyncLine, width));
 				}
 				if (warningLine) {
 					outputLines.push(truncateToWidth(warningLine, width));
