@@ -1,6 +1,12 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	antigravityRankingStrategy,
+	claudeRankingStrategy,
+	type UsageLimit,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	type ComposerStyle,
@@ -46,7 +52,11 @@ const TIME_SPENT_TICK_MS = 1000;
 /** A displayable limit after provider, account, model, and window filtering. */
 interface UsageWindowCandidate {
 	id?: string;
-	windowClass: "5h" | "7d" | "monthly";
+	/** Canonical 5h/7d/monthly bucket, when this candidate maps onto one. */
+	windowClass?: "5h" | "7d" | "monthly";
+	/** Dedup key for the generic labeled-window fallback (e.g. antigravity's Daily/Weekly). */
+	windowKey?: string;
+	label?: string;
 	fraction: number;
 	resetsAt?: number;
 }
@@ -1579,45 +1589,76 @@ export class StatusLineComponent implements Component {
 		monthly?: { percent: number; resetHours?: number };
 	} | null {
 		if (!Array.isArray(reports)) return null;
+		const { provider: activeProvider, modelId: activeModelId, identity: activeIdentity } = context;
+		const normalizedActiveModelId = normalizeUsageScopeValue(activeModelId);
 		const now = Date.now();
-		const activeModelId = normalizeUsageScopeValue(context.modelId);
+		const cursorMonthlyPriority = (limitId: unknown): number => {
+			// When /auth/usage and /api/usage-summary are merged, prefer the personal
+			// dashboard rails over legacy per-model request fractions.
+			if (limitId === "cursor:usd:individual-auto") return 0;
+			if (limitId === "cursor:usd:individual-plan" || limitId === "cursor:usd:individual-overall") return 1;
+			if (typeof limitId === "string" && limitId.startsWith("cursor:usd:individual-")) return 2;
+			return 3;
+		};
 		const scopeGroups = new Map<string, UsageScopeGroup>();
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
 			const provider = "provider" in report ? report.provider : undefined;
-			if (context.provider && provider !== context.provider) continue;
+			if (activeProvider && provider !== activeProvider) continue;
 			const limits = "limits" in report ? report.limits : undefined;
 			if (!Array.isArray(limits)) continue;
 			// fetchUsageReports supplies normalized rows; the guards above protect
-			// the unknown session boundary before the account matcher reads metadata.
+			// the unknown session boundary before the ranking strategies and the
+			// account matcher read typed report/limit fields below.
 			const usageReport = report as UsageReport;
-			for (const limit of limits) {
-				if (
-					!limit ||
-					typeof limit !== "object" ||
-					!("scope" in limit) ||
-					!limit.scope ||
-					typeof limit.scope !== "object" ||
-					!("amount" in limit) ||
-					!limit.amount ||
-					typeof limit.amount !== "object"
-				) {
+			let relevantLimits = limits as UsageLimit[];
+			const rankingContext = activeModelId ? { modelId: activeModelId } : undefined;
+			// Ranking strategies already resolve the correct primary/secondary
+			// pair for these providers (drain-rate pressure, tier-vs-model-kind
+			// matching); the generic modelId/tier scope grouping below exists for
+			// providers without one and would otherwise re-split an already
+			// correctly chosen pair back into separate, competing groups.
+			let usedRankingStrategy = false;
+			if (provider === "google-antigravity") {
+				const scoped = antigravityRankingStrategy.scopeLimits?.(usageReport, rankingContext);
+				if (scoped && scoped.length > 0) {
+					relevantLimits = scoped;
+					usedRankingStrategy = true;
+				}
+			} else if (provider === "anthropic") {
+				const { primary, secondary } = claudeRankingStrategy.findWindowLimits(usageReport, rankingContext);
+				const ranked = [primary, secondary].filter((limit): limit is UsageLimit => limit !== undefined);
+				if (ranked.length > 0) {
+					relevantLimits = ranked;
+					usedRankingStrategy = true;
+				}
+			}
+			for (const limit of relevantLimits) {
+				if (!limit || typeof limit !== "object") continue;
+				if (activeIdentity && !limitMatchesActiveAccount(usageReport, limit as UsageLimit, activeIdentity)) {
 					continue;
 				}
-				const scope = limit.scope;
-				const amount = limit.amount;
-				// The matcher only reads scope identity fields, whose object boundary
-				// is validated above; other required UsageLimit fields are irrelevant.
-				const usageLimit = limit as UsageLimit;
-				if (context.identity && !limitMatchesActiveAccount(usageReport, usageLimit, context.identity)) continue;
-
-				const fraction = "usedFraction" in amount ? amount.usedFraction : undefined;
-				if (typeof fraction !== "number") continue;
-				const window =
-					"window" in limit && limit.window && typeof limit.window === "object" ? limit.window : undefined;
-				const windowId = "windowId" in scope ? scope.windowId : undefined;
-				const durationValue = window && "durationMs" in window ? window.durationMs : undefined;
-				const durationMs = typeof durationValue === "number" ? durationValue : undefined;
+				// Guarded by the object/limits checks above; cast once to read the
+				// typed scope/window/amount fields for the rest of this iteration.
+				const l = limit as UsageLimit;
+				const amount = l.amount;
+				const fraction =
+					amount?.usedFraction ??
+					(amount?.used !== undefined && amount.limit !== undefined && amount.limit > 0
+						? amount.used / amount.limit
+						: amount?.unit === "percent" && amount.used !== undefined
+							? amount.used / 100
+							: amount?.remainingFraction !== undefined
+								? Math.max(0, 1 - amount.remainingFraction)
+								: undefined);
+				if (typeof fraction !== "number" || !Number.isFinite(fraction)) continue;
+				const windowId = l.scope?.windowId;
+				const resetsAt = l.window?.resetsAt;
+				const durationMs = l.window?.durationMs;
+				// Canonical window ids win. Fall back to the reported span (same
+				// tolerance as the 5h priority-boost check) so providers that emit
+				// non-canonical ids, and cache rows written before a provider was
+				// canonicalized, still map onto the two subscription windows.
 				const subscriptionWindow =
 					windowId === "5h" || windowId === "7d"
 						? windowId
@@ -1628,28 +1669,37 @@ export class StatusLineComponent implements Component {
 								: undefined;
 				const windowClass =
 					subscriptionWindow ??
-					((context.provider === "cursor" || context.provider === "opencode-go") &&
+					((activeProvider === "cursor" || activeProvider === "opencode-go") &&
 					(windowId === "monthly" || windowId === "30d")
 						? "monthly"
 						: undefined);
-				if (!windowClass) continue;
+				// Non-canonical windows (e.g. antigravity's Daily/Weekly counters)
+				// still get a display slot via the generic labeled-window fallback,
+				// gated in the renderer to only appear when no canonical window matched.
+				const windowKey = windowId === "5h" || windowId === "7d" ? windowId : l.id;
+				const genericWindowLabel = l.window?.label && l.window.label !== "Default" ? l.window.label : l.label;
+				const label = windowId === "5h" || windowId === "7d" ? windowId : genericWindowLabel;
+				const hasLabel = typeof windowKey === "string" && typeof label === "string" && label.length > 0;
+				if (!windowClass && !hasLabel) continue;
 
-				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);
-				if (modelId && modelId !== activeModelId) continue;
-				const rawTier = "tier" in scope ? scope.tier : undefined;
+				const modelId = normalizeUsageScopeValue(l.scope?.modelId);
+				if (modelId && modelId !== normalizedActiveModelId) continue;
+				const rawTier = l.scope?.tier;
 				const tier = typeof rawTier === "string" && rawTier.trim() ? rawTier.trim() : undefined;
 				const normalizedTier = normalizeUsageScopeValue(tier);
-				const scopeKey = `${modelId ?? ""}\0${normalizedTier ?? ""}`;
+				const scopeKey = usedRankingStrategy ? `ranked:${provider}` : `${modelId ?? ""}\0${normalizedTier ?? ""}`;
 				// Exact-model groups outrank provider-wide groups; within either
 				// specificity, untiered limits preserve the historical preference.
-				const priority = modelId ? (normalizedTier ? 1 : 0) : normalizedTier ? 3 : 2;
-				const id = "id" in limit && typeof limit.id === "string" ? limit.id : undefined;
-				const resetValue = window && "resetsAt" in window ? window.resetsAt : undefined;
+				// A ranked-selection group always wins: it is already the single
+				// correctly-chosen pair for the active model/credential.
+				const priority = usedRankingStrategy ? -1 : modelId ? (normalizedTier ? 1 : 0) : normalizedTier ? 3 : 2;
 				const displayCandidate: UsageWindowCandidate = {
-					id,
+					id: l.id,
 					windowClass,
+					windowKey: hasLabel ? windowKey : undefined,
+					label: hasLabel ? label : undefined,
 					fraction,
-					resetsAt: typeof resetValue === "number" ? resetValue : undefined,
+					resetsAt: typeof resetsAt === "number" ? resetsAt : undefined,
 				};
 				const group = scopeGroups.get(scopeKey);
 				if (group) {
@@ -1670,14 +1720,7 @@ export class StatusLineComponent implements Component {
 		let sevenDay: { percent: number; resetHours?: number } | undefined;
 		let monthly: { percent: number; resetHours?: number } | undefined;
 		let monthlyPriority = Number.POSITIVE_INFINITY;
-		const cursorMonthlyPriority = (limitId: unknown): number => {
-			// When /auth/usage and /api/usage-summary are merged, prefer the personal
-			// dashboard rails over legacy per-model request fractions.
-			if (limitId === "cursor:usd:individual-auto") return 0;
-			if (limitId === "cursor:usd:individual-plan" || limitId === "cursor:usd:individual-overall") return 1;
-			if (typeof limitId === "string" && limitId.startsWith("cursor:usd:individual-")) return 2;
-			return 3;
-		};
+		const windows = new Map<string, { label: string; percent: number; resetMs?: number }>();
 		for (const candidate of selectedGroup.candidates) {
 			if (candidate.windowClass === "5h" && !fiveHour) {
 				fiveHour = {
@@ -1710,9 +1753,22 @@ export class StatusLineComponent implements Component {
 					monthlyPriority = priority;
 				}
 			}
+			if (candidate.windowKey && candidate.label && !windows.has(candidate.windowKey)) {
+				windows.set(candidate.windowKey, {
+					label: candidate.label,
+					percent: candidate.fraction * 100,
+					resetMs: typeof candidate.resetsAt === "number" ? Math.max(0, candidate.resetsAt - now) : undefined,
+				});
+			}
 		}
-		if (!fiveHour && !sevenDay && !monthly) return null;
-		return { tier: selectedGroup.tier, fiveHour, sevenDay, monthly };
+		if (windows.size === 0 && !fiveHour && !sevenDay && !monthly) return null;
+		return {
+			tier: selectedGroup.tier,
+			windows: windows.size > 0 ? Array.from(windows.values()) : undefined,
+			fiveHour,
+			sevenDay,
+			monthly,
+		};
 	}
 
 	/**
@@ -2762,8 +2818,9 @@ export class StatusLineComponent implements Component {
 			style?.bottomBar ?? (this.#standalone === false ? "none" : this.#standalone === "left-only" ? "left" : "full");
 		const lines: string[] = [];
 		if (attachment === "top-border") {
-			const border = this.getTopBorder(width);
-			if (border.content) lines.push(border.content);
+			for (const row of this.getTopBorderRows(width)) {
+				if (row.content) lines.push(row.content);
+			}
 		} else if (attachment === "top-rule-chip") {
 			// Render the chip on its rule exactly as the claude composer does.
 			const rule = claudeComposerStyle.renderTop({
