@@ -573,7 +573,7 @@ describe("AgentSession advisor context maintenance", () => {
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": "1",
 			"compaction.enabled": true,
-			"compaction.methodOrder": ["context-full"],
+			"compaction.methodOrder": ["soft"],
 			"contextPromotion.enabled": false,
 		});
 		const agent = new Agent({
