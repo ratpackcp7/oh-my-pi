@@ -2056,7 +2056,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusLine.setAutocompleteActiveProbe(() => this.editor.isAutocompleteActive());
 		switch (style.statusAttachment) {
 			case "top-border":
-				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorderRows(availableWidth));
 				break;
 			case "top-rule-chip":
 				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getStandaloneTopBorder(availableWidth));
