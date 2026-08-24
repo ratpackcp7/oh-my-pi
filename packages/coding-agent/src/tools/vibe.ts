@@ -110,6 +110,14 @@ export interface VibeToolDetails {
 	killed?: VibeKillOutcome;
 }
 
+function screensOf(session: ToolSession, ids?: string[]): VibeScreenSnapshot[] {
+	return VibeSessionRegistry.global().screens(session, ids);
+}
+
+function textResult(text: string, details: VibeToolDetails): AgentToolResult<VibeToolDetails> {
+	return { content: [{ type: "text", text }], details };
+}
+
 export class VibeSpawnTool implements AgentTool<typeof vibeSpawnSchema, VibeToolDetails> {
 	readonly name = "vibe_spawn";
 	readonly approval = "exec" as const;
