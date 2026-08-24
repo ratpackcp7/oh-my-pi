@@ -50,9 +50,27 @@ import {
 export const VIBE_TOOL_NAMES = ["vibe_spawn", "vibe_send", "vibe_wait", "vibe_kill", "vibe_list"] as const;
 
 const vibeSpawnSchema = type({
-	cli: type("'fast' | 'good'").describe(
-		"worker flavor: fast = low-latency model for mechanical work; good = strong model for hard work",
+	"cli?": type("'fast' | 'good'").describe(
+		"worker flavor: fast = low-latency model for mechanical work; good = strong model for hard work (legacy; prefer role)",
 	),
+	"role?": type("'scout' | 'utility' | 'implementer' | 'designer' | 'planner' | 'reviewer'").describe(
+		"generic role for routing (scout, utility, implementer, designer, planner, reviewer)",
+	),
+	"model?": type("string | string[]").describe("explicit model selector pin (bypasses routing; fails PIN_UNAVAILABLE if unavailable)"),
+	"intent?": type("'default' | 'cheap' | 'normal' | 'strong' | 'vision' | 'large-context' | 'same-pool-ok'").describe("generic routing intent"),
+	"routing?": type({
+		"excludePools?": "string[]",
+		"preferPools?": "string[]",
+		"allowParentPool?": "boolean",
+		"deadSelectors?": "string[]",
+	}).describe("generic routing constraints (pool protection, dead selectors for reviewer independence)"),
+	"metadata?": type({
+		"externalTaskId?": "string",
+		"specPath?": "string",
+		"policyHash?": "string",
+		"policyRevision?": "string",
+		"label?": "string",
+	}).describe("generic external linkage (Foreman task/spec, policy identity)"),
 	"name?": type("string <= 48").describe("optional session name; generated when omitted"),
 	prompt: type("string > 0").describe("first instruction; the worker starts with no other context"),
 });
@@ -92,19 +110,11 @@ export interface VibeToolDetails {
 	killed?: VibeKillOutcome;
 }
 
-function screensOf(session: ToolSession, ids?: string[]): VibeScreenSnapshot[] {
-	return VibeSessionRegistry.global().screens(session, ids);
-}
-
-function textResult(text: string, details: VibeToolDetails): AgentToolResult<VibeToolDetails> {
-	return { content: [{ type: "text", text }], details };
-}
-
 export class VibeSpawnTool implements AgentTool<typeof vibeSpawnSchema, VibeToolDetails> {
 	readonly name = "vibe_spawn";
 	readonly approval = "exec" as const;
 	readonly label = "Vibe Spawn";
-	readonly summary = "Start a persistent fast/good worker session";
+	readonly summary = "Start a persistent worker session (cli or role)";
 	readonly description: string;
 	readonly parameters = vibeSpawnSchema;
 	readonly strict = true;
@@ -113,10 +123,11 @@ export class VibeSpawnTool implements AgentTool<typeof vibeSpawnSchema, VibeTool
 	}
 
 	async execute(_toolCallId: string, params: typeof vibeSpawnSchema.infer): Promise<AgentToolResult<VibeToolDetails>> {
-		const { id, jobId } = await VibeSessionRegistry.global().spawn(this.session, params);
+		const { id, jobId } = await VibeSessionRegistry.global().spawn(this.session, params as unknown as Parameters<VibeSessionRegistry["spawn"]>[1]);
+		const label = params.role ? `role:${params.role}` : params.cli;
 		return textResult(
-			`Spawned ${params.cli} session \`${id}\` (turn job \`${jobId}\`). The turn result will be delivered when it finishes — keep directing other sessions meanwhile. Continue this one with vibe_send \`${id}\`.`,
-			{ op: "spawn", screens: screensOf(this.session), spawned: { id, cli: params.cli, jobId } },
+			`Spawned ${label} session \`${id}\` (turn job \`${jobId}\`). The turn result will be delivered when it finishes — keep directing other sessions meanwhile. Continue this one with vibe_send \`${id}\`.`,
+			{ op: "spawn", screens: screensOf(this.session), spawned: { id, cli: (params.cli as VibeCli) ?? "good", jobId } },
 		);
 	}
 }
