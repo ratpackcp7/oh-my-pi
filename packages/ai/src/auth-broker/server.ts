@@ -702,7 +702,11 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						// upstream call — secret-free (timestamps + a fixed error code only).
 						const health = opts.storage.getUsageHealth();
 						logger.info("auth-broker usage served", { peer, reports: trimmed.length });
-						return json(200, { generatedAt: Date.now(), reports: trimmed, ...(health.length > 0 ? { health } : {}) });
+						return json(200, {
+							generatedAt: Date.now(),
+							reports: trimmed,
+							...(health.length > 0 ? { health } : {}),
+						});
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
 						logger.warn("auth-broker usage fetch failed", { peer, error: message });

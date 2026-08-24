@@ -2,7 +2,8 @@
  * Vibe mode tools — the director's entire non-read surface.
  *
  * Five thin tools over {@link VibeSessionRegistry}: spawn/send/wait/kill/list
- * persistent worker sessions ("fast"/"good" CLIs). Spawns and sends return
+ * persistent worker sessions (role: scout/utility/implementer/designer/planner/reviewer
+ * preferred when managed; cli fast/good fallback). Spawns and sends return
  * immediately; turn results self-deliver through the async job manager.
  *
  * The TUI renderers lean into the "you are driving little CLIs" fiction:
@@ -448,6 +449,7 @@ function tvScreen(
 	if (screen.intent && screen.intent !== "default") headParts.push(uiTheme.fg("dim", screen.intent));
 	if (screen.metadata?.externalTaskId)
 		headParts.push(uiTheme.fg("dim", `task:${frameText(screen.metadata.externalTaskId, 16)}`));
+	const body: string[] = [];
 	const hook = uiTheme.tree.hook;
 	if (live) {
 		if (screen.turnMessage) {

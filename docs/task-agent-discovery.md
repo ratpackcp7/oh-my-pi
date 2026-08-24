@@ -90,11 +90,11 @@ For a dispatch, set the agent name and task:
 
 After dispatch, press `Alt+A` to open [Agent Hub](./agent-hub.md). Its live roster shows each task agent's status, current activity, model, age, and usage. Select an agent to read its transcript and steer it directly; parked agents can be revived from the same view.
 
-### `vibe_spawn` tier routing
+### `vibe_spawn` routing
 
-`vibe_spawn` maps `fast` to bundled `sonic` and `good` to bundled `task`. Both resolve through `task.agentModelOverrides` before their bundled agent model defaults (`src/vibe/runtime.ts`, `src/task/agents.ts`).
+`vibe_spawn` supports two shapes: `cli` (`fast` → `sonic`, `good` → `task`) and `role` (`scout`/`utility`/`implementer`/`designer`/`planner`/`reviewer`). The `cli` path is the vanilla fallback — still fully supported. When managed policy is available, prefer `role`; it reuses the native task router and lets the orchestrator supply model + routing constraints. Both shapes resolve through `task.agentModelOverrides` before bundled defaults (`src/vibe/runtime.ts`, `src/task/agents.ts`) and, when unavailable, fall back to native defaults rather than failing.
 
-Route these tiers through roles by keeping aliases in `task.agentModelOverrides` and concrete selectors only in `modelRoles`:
+Route either tier through roles by keeping aliases in `task.agentModelOverrides` and concrete selectors only in `modelRoles`:
 
 ```yaml
 task:
@@ -106,7 +106,7 @@ modelRoles:
   good_worker: openai/gpt-5.4:high
 ```
 
-The `vibe_spawn` `cli` remains `fast` or `good`; update `modelRoles` to change the worker model.
+The `vibe_spawn` `cli` remains `fast` or `good`; update `modelRoles` to change the vanilla worker model. For managed roles, update the orchestrator policy, not Vibe core.
 
 ## Bundled agents
 

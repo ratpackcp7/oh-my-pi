@@ -491,7 +491,6 @@ export class Editor implements Component, Focusable {
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
-	#widthEpochRevision = 0;
 	// Line measurement + word-wrap cache shared by #layoutText,
 	// #buildVisualLineMap, and key handlers within a frame. Line text is a
 	// sound key (strings are immutable); cleared on layout-width or
@@ -592,9 +591,6 @@ export class Editor implements Component, Focusable {
 	// per-event rebuilds down to one per rendered frame (see #4145).
 	#topBorderContent?: EditorTopBorder | EditorTopBorders;
 	#topBorderProvider?: (availableWidth: number) => EditorTopBorder | EditorTopBorders | undefined;
-	#topBorderProviderWidth: number | undefined;
-	#topBorderProviderSignature: string | undefined;
-	#topBorderProviderRevision: number | undefined;
 	#topBorderRowCount = 1;
 	#borderVisible = true;
 	#borderStyle: EditorBorderStyle = "box";
@@ -1034,30 +1030,12 @@ export class Editor implements Component, Focusable {
 		const statusRowRight = this.borderColor(
 			`${box.horizontal.repeat(paddingX)}${this.#theme.symbols.boxSharp.teeLeft}`,
 		);
-		const bottomLeft = this.borderColor(`${box.bottomLeft}${box.horizontal}${padding(Math.max(0, paddingX - 1))}`);
-		const horizontal = this.borderColor(box.horizontal);
 
 		const topFillWidth = borderVisible ? Math.max(0, width - borderWidth * 2) : 0;
 		let rawTopBorder: EditorTopBorder | EditorTopBorders | undefined;
 		if (borderVisible) {
 			if (this.#topBorderProvider) {
-				const previousWidth = this.#topBorderProviderWidth;
 				rawTopBorder = this.#topBorderProvider(topFillWidth);
-				const rows = rawTopBorder ? (Array.isArray(rawTopBorder) ? rawTopBorder : [rawTopBorder]) : [];
-				const signature = rows.map(row => `${row.width}\0${row.content}`).join("\n");
-				const revision = rows.find(row => row.revision !== undefined)?.revision;
-				if (
-					(previousWidth !== undefined &&
-						revision !== undefined &&
-						this.#topBorderProviderRevision !== undefined &&
-						revision !== this.#topBorderProviderRevision) ||
-					(previousWidth === topFillWidth && signature !== this.#topBorderProviderSignature)
-				) {
-					this.#widthEpochRevision++;
-				}
-				this.#topBorderProviderWidth = topFillWidth;
-				this.#topBorderProviderSignature = signature;
-				this.#topBorderProviderRevision = revision;
 			} else {
 				rawTopBorder = this.#topBorderContent;
 			}

@@ -998,6 +998,8 @@ export class VibeSessionRegistry {
 						.map(entry => firstLine(`${entry.tool}${entry.args ? `(${entry.args})` : ""}`, TRACE_LINE_MAX))
 				: [],
 			outputTail: (record.live?.outputTail ?? []).map(line => firstLine(line, 100)),
+			lastActivity: record.lastActivity,
+			lastActivityAt: record.lastActivityAt,
 		}));
 	}
 

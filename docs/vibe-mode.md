@@ -21,20 +21,20 @@ Toggle it with the `/vibe` slash command:
 
 `/vibe` is an interactive-TUI command. The mode and worker lifecycle events are persisted with the parent session. Resuming a session whose current mode is `vibe` rehydrates completed workers as idle/parked sessions with their child transcripts; a turn interrupted by process restart is not resumed automatically. Explicitly killed or mode-exit workers stay terminal.
 
-## The two worker tiers
+## The two worker tiers (vanilla fallback)
 
-Every worker is a real, keep-alive task-executor subagent with the normal coding tool surface and its own persisted child transcript. Choose a tier when spawning:
+Every worker is a real, keep-alive task-executor subagent with the normal coding tool surface and its own persisted child transcript. For vanilla use (no orchestrator), choose a tier:
 
 | Tier   | Bundled agent | Default role | Use for                                             |
 | ------ | ------------- | ------------ | --------------------------------------------------- |
 | `fast` | `sonic`       | `@smol`      | Mechanical execution, drafts, high-volume work      |
 | `good` | `task`        | `@task`      | Design, judgment calls, and reviewing `fast` output |
 
-The tier always selects the bundled `sonic` or `task` definition, not a same-named discovered custom agent. Model resolution otherwise matches task-agent routing: `task.agentModelOverrides.sonic` / `.task` wins over the bundled agent model, and role aliases resolve through `modelRoles`, with the parent active/default model as fallback.
+The tier always selects the bundled `sonic` or `task` definition, not a same-named discovered custom agent. Model resolution otherwise matches task-agent routing: `task.agentModelOverrides.sonic` / `.task` wins over the bundled agent model, and role aliases resolve through `modelRoles`, with the parent active/default model as fallback. When managed policy is available, prefer role-oriented workers below — `fast`/`good` remain valid fallback, not the managed path.
 
-## Generic role-oriented workers (CP7 integration)
+## Generic role-oriented workers (preferred when managed)
 
-For managed, policy-driven use (CP7 orchestrator / Foreman), `vibe_spawn` also accepts a generic role-oriented shape. This is the same persistent Vibe worker; only the routing identity differs. `cli` (`fast`/`good`) remains fully backward compatible.
+For managed, policy-driven use (CP7 orchestrator / Foreman), `vibe_spawn` prefers a generic role-oriented shape. This is the same persistent Vibe worker; only the routing identity differs. `cli` (`fast`/`good`) remains fully backward compatible as the vanilla fallback. When the managed integration is absent, roles use native routing defaults or clearly report that the optional policy integration is unavailable.
 
 | Role | Bundled agent | Typical intent | Use for |
 |------|---------------|----------------|---------|
@@ -43,7 +43,7 @@ For managed, policy-driven use (CP7 orchestrator / Foreman), `vibe_spawn` also a
 | `implementer` | `task` | `strong` | Bounded implementation + tests |
 | `designer` | `designer` | `strong` | UI/interface shaping |
 | `planner` | `task` | `strong` | Decomposition |
-| `reviewer` | `reviewer` | `strong` | Independent review (never same model/family as implementer) |
+| `reviewer` | `reviewer` | `strong` | Independent review when managed (never same family as implementer) |
 
 New `vibe_spawn` fields (all optional, generic — no CP7 paths/imports in OMP core):
 
@@ -101,7 +101,7 @@ Worker ids are scoped to the owning agent and parent session; a worker from anot
 3. Keep directing other workers while turns are in flight. Use `vibe_wait` only when blocked; a timed-out wait can be reissued.
 4. Use `vibe_send` naturally for corrections and next steps. A mid-turn send steers when possible; otherwise it becomes the worker's next turn automatically.
 5. When a result arrives, `read` touched files and inspect full output when the preview is insufficient. Reconcile verified work through the optional parent `todo`.
-6. Route by difficulty: draft with `fast`, escalate to `good` when mechanical execution stalls or judgment is required.
+6. Route by role when managed: `implementer` builds, `reviewer` verifies (independent family); otherwise route by difficulty: `fast` drafts, `good` judges.
 7. Use `vibe_kill` for a finished/stuck worker. Exiting the mode kills the entire remaining scope.
 
 The director remains responsible for the final outcome: worker completion means the turn settled, not that its claims are correct.
