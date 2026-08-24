@@ -1134,6 +1134,62 @@ export class VibeSessionRegistry {
 				resolved = this.#resolveWorker(session, cli as VibeCli);
 			}
 			const { agent, modelOverride, modelRole } = resolved;
+			const plannedSelector = Array.isArray(modelOverride) ? modelOverride[0] : (modelOverride as string | undefined);
+			const modelRegistry = (session as unknown as ToolSession).modelRegistry;
+			let persistedUnavailable = false;
+			if (plannedSelector && modelRegistry?.getAvailable) {
+				try {
+					const available = modelRegistry.getAvailable() ?? [];
+					const selectorSet = new Set((available as Array<{ provider: string; id: string }>).map(m => `${m.provider}/${m.id}`.toLowerCase()));
+					const base = plannedSelector.split("@")[0].split(":")[0].toLowerCase();
+					let found = selectorSet.has(base);
+					if (!found && !base.includes("/")) {
+						for (const sel of selectorSet) if (sel.endsWith(`/${base}`)) { found = true; break; }
+					}
+					if (!found) persistedUnavailable = true;
+				} catch {}
+			}
+			if (persistedUnavailable) {
+				// Surface unavailable without silent reassignment (G11): keep transcript but mark dead with reason
+				if (!existing) {
+					AgentRegistry.global().register({
+						id: spawn.id,
+						displayName: spawn.id,
+						kind: "sub",
+						parentId: scope.ownerId,
+						session: null,
+						sessionFile: childSessionFile,
+						status: "aborted",
+					});
+				}
+				this.#records.set(key, {
+					id: spawn.id,
+					cli: (spawn as VibeSpawnLifecycleEventV1).cli ?? (spawn as VibeSpawnLifecycleEventV2).cli,
+					role: (spawn as VibeSpawnLifecycleEventV2).role,
+					ownerId: scope.ownerId,
+					parentSessionId: scope.parentSessionId,
+					parentSessionFile: scope.parentSessionFile,
+					childSessionFile,
+					agent,
+					modelOverride,
+					modelRole,
+					intent: (spawn as VibeSpawnLifecycleEventV2).intent,
+					routing: (spawn as VibeSpawnLifecycleEventV2).routing,
+					metadata: (spawn as VibeSpawnLifecycleEventV2).metadata,
+					plannedModel: plannedSelector,
+					state: "dead",
+					createdAt: spawn.createdAt,
+					lastActivityAt: candidate.lastActivityAt,
+					lastActivity: `persisted route unavailable: ${plannedSelector} requires explicit replacement`,
+					queue: [],
+					turnCount: candidate.turnCount,
+					killed: false,
+					suspended: false,
+					terminalPersisted: false,
+				});
+				restored++;
+				continue;
+			}
 			if (!existing) {
 				AgentRegistry.global().register({
 					id: spawn.id,
