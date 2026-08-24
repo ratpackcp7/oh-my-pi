@@ -283,12 +283,17 @@ export class VibeListTool implements AgentTool<typeof vibeListSchema, VibeToolDe
 			return textResult("No vibe sessions. Spawn one with vibe_spawn.", details);
 		}
 		const lines = screens.map(screen => {
+			const roleOrCli = screen.role ?? screen.cli ?? "task";
 			const parts = [
-				`- \`${screen.id}\` [${screen.cli}] ${screen.state}`,
+				`- \`${screen.id}\` [${roleOrCli}] ${screen.state}`,
 				`${screen.turns} turn${screen.turns === 1 ? "" : "s"}`,
 			];
 			if (screen.queued > 0) parts.push(`${screen.queued} queued`);
 			if (screen.model) parts.push(screen.model);
+			else if (screen.plannedModel) parts.push(screen.plannedModel);
+			if (screen.plannedModel && screen.model && screen.plannedModel !== screen.model) parts.push(`planned:${screen.plannedModel}`);
+			if (screen.intent && screen.intent !== "default") parts.push(`intent:${screen.intent}`);
+			if (screen.metadata?.externalTaskId) parts.push(`task:${screen.metadata.externalTaskId}`);
 			if (screen.lastActivity) parts.push(`last: ${screen.lastActivity}`);
 			return parts.join(" · ");
 		});
@@ -411,7 +416,8 @@ function tvScreen(
 		uiTheme,
 		spinnerFrame,
 	);
-	const badge = formatBadge(screen.cli, stateToColor(screen.state), uiTheme);
+	const roleOrCli = screen.role ?? screen.cli ?? "task";
+	const badge = formatBadge(roleOrCli, stateToColor(screen.state), uiTheme);
 	const idText =
 		live && options.spinnerFrame !== undefined && shimmerEnabled()
 			? shimmerText(screen.id, uiTheme)
@@ -423,8 +429,12 @@ function tvScreen(
 		headParts.push(uiTheme.fg("dim", formatDuration(Date.now() - screen.turnStartedAt)));
 	}
 	if (screen.model) headParts.push(uiTheme.fg("muted", frameText(screen.model, 40)));
-
-	const body: string[] = [];
+	else if (screen.plannedModel) headParts.push(uiTheme.fg("muted", frameText(screen.plannedModel, 40)));
+	if (screen.plannedModel && screen.model && screen.plannedModel !== screen.model) {
+		headParts.push(uiTheme.fg("dim", `planned:${frameText(screen.plannedModel, 20)}`));
+	}
+	if (screen.intent && screen.intent !== "default") headParts.push(uiTheme.fg("dim", screen.intent));
+	if (screen.metadata?.externalTaskId) headParts.push(uiTheme.fg("dim", `task:${frameText(screen.metadata.externalTaskId, 16)}`));
 	const hook = uiTheme.tree.hook;
 	if (live) {
 		if (screen.turnMessage) {
