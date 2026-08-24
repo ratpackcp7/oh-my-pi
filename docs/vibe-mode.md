@@ -39,6 +39,7 @@ For managed, policy-driven use (CP7 orchestrator / Foreman), `vibe_spawn` prefer
 | Role | Bundled agent | Typical intent | Use for |
 |------|---------------|----------------|---------|
 | `scout` | `scout` | `cheap` | Read-only reconnaissance |
+| `utility` | `sonic` | `cheap` | Mechanical edits, data collection |
 | `implementer` | `task` | `strong` | Bounded implementation + tests |
 | `designer` | `designer` | `strong` | UI/interface shaping |
 | `planner` | `task` | `strong` | Decomposition |
