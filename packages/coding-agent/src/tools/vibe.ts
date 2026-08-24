@@ -2,7 +2,8 @@
  * Vibe mode tools — the director's entire non-read surface.
  *
  * Five thin tools over {@link VibeSessionRegistry}: spawn/send/wait/kill/list
- * persistent worker sessions ("fast"/"good" CLIs). Spawns and sends return
+ * persistent worker sessions (role: scout/utility/implementer/designer/planner/reviewer
+ * preferred when managed; cli fast/good fallback). Spawns and sends return
  * immediately; turn results self-deliver through the async job manager.
  *
  * The TUI renderers lean into the "you are driving little CLIs" fiction:

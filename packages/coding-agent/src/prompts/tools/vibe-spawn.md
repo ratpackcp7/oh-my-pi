@@ -1,12 +1,12 @@
-Starts persistent conversational coding-agent worker session (edit, bash, grep, everything).
+Starts persistent worker session. Prefer role when managed routing is available; otherwise cli is the vanilla fallback.
 
-CLI flavor by task:
-- `fast`: low-latency model; mechanical, well-specified work (renames, boilerplate, running tests, data collection).
-- `good`: strong model; hard work (design, debugging, multi-file changes, judgment calls).
+Managed roles (preferred when orchestrator available): `scout` | `utility` | `implementer` | `designer` | `planner` | `reviewer` — pass `role` and let the orchestrator supply model + routing (pool constraints, independence). When unavailable, roles use native routing defaults or report that the optional policy integration is unavailable.
 
-`prompt`: first session instruction. Worker starts with NO context beyond it; include files, constraints, acceptance criteria.
-`name`: optional session label; otherwise generated.
+Fallback: `cli` — `fast` (mechanical, low-latency) or `good` (hard, strong) — still fully supported for vanilla use.
 
-Returns session id immediately. On worker completion, turn result—activity trace + worker response—delivered automatically. Do not wait unless blocked; direct other sessions.
+`prompt`: first instruction — worker starts blank; include files, constraints, acceptance criteria.
+`name`: optional label (48 chars).
 
-Session persists after turn; remembers whole conversation. Same-workstream follow-up: `vibe_send`; NEVER spawn second session.
+Provide either `cli` or `role` (not both). Unknown role fails with list. Optional `model` pin bypasses routing (PIN_UNAVAILABLE if not in registry); `intent`/`routing`/`metadata` are generic routing/task linkage.
+
+Returns id immediately; turn result self-delivers. Session persists; use `vibe_send` for follow-ups, never respawn same workstream.
