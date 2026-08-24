@@ -166,8 +166,8 @@ export class FooterComponent implements Component {
 				if (usingSubscription) {
 					const spend =
 						theme.getSymbolPreset() === "nerd" && subscriptionIcon
-							? `${subscriptionIcon} ${formatted}`
-							: `S${formatted}`;
+							? `${subscriptionIcon} $${formatted}`
+							: `sub $${formatted}`;
 					billingParts.push(spend);
 				} else {
 					billingParts.push(`$${formatted}`);

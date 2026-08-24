@@ -15,7 +15,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { adjustHsv, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
+import { adjustHsv, formatNumber, getProjectDir, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
@@ -35,7 +35,7 @@ import {
 } from "../codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
 import { getPreset } from "./presets";
-import { renderSegment, type SegmentContext } from "./segments";
+import { classifyProjectDir, renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
@@ -239,6 +239,8 @@ interface ActiveRepoCache {
 	projectDir: string;
 	activeRepo: ActiveRepoContext | null;
 	effectiveGitCwd: string;
+	/** Ignore a repository inherited from outside the current scratch root. */
+	suppressVcs: boolean;
 	/** Project + worktree dir name when `projectDir` is a linked worktree, else null. */
 	worktree: WorktreeContext | null;
 }
@@ -585,12 +587,22 @@ export class StatusLineComponent implements Component {
 			return this.#activeRepoCache;
 		}
 
+		const classification = classifyProjectDir(projectDir);
+		const repository = classification.scratch ? git.repo.resolveSync(projectDir) : null;
+		const suppressVcs = Boolean(
+			classification.root && repository && !pathIsWithin(classification.root, repository.repoRoot),
+		);
+		if (suppressVcs) {
+			this.#activeRepoCache = { projectDir, activeRepo: null, effectiveGitCwd: projectDir, suppressVcs: true, worktree: null };
+			return this.#activeRepoCache;
+		}
+
 		const activeRepo = resolveActiveRepoContextSync(projectDir);
 		const effectiveGitCwd = activeRepo?.repoRoot ?? projectDir;
 		// Only collapse the bare-cwd case: a single-direct-child-repo context
 		// (activeRepo set) renders `<parent> ↳ <child>`, which we leave intact.
 		const worktree = activeRepo ? null : resolveWorktreeContext(effectiveGitCwd);
-		this.#activeRepoCache = { projectDir, activeRepo, effectiveGitCwd, worktree };
+		this.#activeRepoCache = { projectDir, activeRepo, effectiveGitCwd, suppressVcs: false, worktree };
 		return this.#activeRepoCache;
 	}
 
@@ -1874,8 +1886,9 @@ export class StatusLineComponent implements Component {
 		const projectDir = getProjectDir();
 		const activeRepoCache = shouldResolveActiveRepo
 			? this.#resolveActiveRepoCache()
-			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, worktree: null };
-		let gitBranch = includeGit || includePr ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
+			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, suppressVcs: false, worktree: null };
+		const vcsVisible = !activeRepoCache.suppressVcs;
+		let gitBranch = vcsVisible && (includeGit || includePr) ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
 		// A jj repo has no git branch to read: git HEAD is detached (colocated) or
 		// absent. A pending reftable resolve owns this cwd as an explicit Git repo,
 		// so it must not be mistaken for an absent Git checkout and fall through to
@@ -1885,14 +1898,14 @@ export class StatusLineComponent implements Component {
 			!this.#cachedBranchHasGitRepository &&
 			!gitHeadResolvePending &&
 			(gitBranch === "detached" || gitBranch === null);
-		if (includeGit && gitHeadIsJjLike) {
+		if (vcsVisible && includeGit && gitHeadIsJjLike) {
 			gitBranch = this.#getJjBranch(activeRepoCache.effectiveGitCwd) ?? gitBranch;
 		}
-		const gitStatus = includeGit
+		const gitStatus = vcsVisible && includeGit
 			? ((gitHeadIsJjLike ? this.#getJjStatus(activeRepoCache.effectiveGitCwd) : null) ??
 				this.#getGitStatus(activeRepoCache.effectiveGitCwd))
 			: null;
-		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
+		const gitPr = vcsVisible && includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);
 		return {

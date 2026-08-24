@@ -263,9 +263,9 @@ function formatSpend(amount: number, usingSubscription: boolean, uiTheme: Theme)
 	if (!usingSubscription) return `$${formatted}`;
 	if (uiTheme.getSymbolPreset() === "nerd") {
 		const icon = uiTheme.icon.subscription;
-		return icon ? `${icon} ${formatted}` : `S${formatted}`;
+		return icon ? `${icon} $${formatted}` : `sub $${formatted}`;
 	}
-	return `S${formatted}`;
+	return `sub $${formatted}`;
 }
 
 function formatAdvisorSpend(amount: number, usingSubscription: boolean, uiTheme: Theme): string {
@@ -295,13 +295,13 @@ const SCRATCH_ROOTS: readonly string[] = (() => {
 	return [...roots];
 })();
 
-function classifyProjectDir(pwd: string): { scratch: boolean; relative: string | null } {
+export function classifyProjectDir(pwd: string): { scratch: boolean; relative: string | null; root: string | null } {
 	for (const root of SCRATCH_ROOTS) {
 		if (pathIsWithin(root, pwd)) {
-			return { scratch: true, relative: relativePathWithinRoot(root, pwd) };
+			return { scratch: true, relative: relativePathWithinRoot(root, pwd), root };
 		}
 	}
-	return { scratch: false, relative: null };
+	return { scratch: false, relative: null, root: null };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

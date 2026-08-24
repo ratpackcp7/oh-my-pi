@@ -168,6 +168,42 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 		component.dispose();
 	});
 });
+
+describe("StatusLineComponent scratch VCS boundary", () => {
+	it.skipIf(process.platform === "win32")("does not display a repository inherited from above the scratch root", () => {
+		const scratchProject = "/var/tmp";
+		const inheritedRepo = {
+			commonDir: "/.git",
+			gitDir: "/.git",
+			gitEntryPath: "/.git",
+			headPath: "/.git/HEAD",
+			repoRoot: "/",
+		} satisfies GitRepository;
+		const repoResolve = vi.spyOn(git.repo, "resolveSync").mockReturnValue(inheritedRepo);
+		const headResolve = vi.spyOn(git.head, "resolveSync").mockReturnValue({
+			...fakeRefHead,
+			branchName: "master",
+			repoRoot: "/",
+		});
+		const statusSummary = vi.spyOn(git.status, "summary").mockResolvedValue({ staged: 0, unstaged: 5, untracked: 64 });
+
+		try {
+			setProjectDir(scratchProject);
+			const component = new StatusLineComponent(makeSession());
+			component.updateSettings(gitSegment);
+			const rendered = component.getTopBorder(80).content;
+
+			expect(repoResolve).toHaveBeenCalledWith(scratchProject);
+			expect(headResolve).not.toHaveBeenCalled();
+			expect(statusSummary).not.toHaveBeenCalled();
+			expect(rendered).not.toContain("master");
+			component.dispose();
+		} finally {
+			setProjectDir(originalProjectDir);
+		}
+	});
+});
+
 describe("StatusLineComponent reftable branch resolve honors mid-flight invalidation", () => {
 	it("discards a stale resolve invalidated mid-flight, keeps the fresh one", async () => {
 		// Force the reftable async-resolve path: #getCurrentBranch only spawns

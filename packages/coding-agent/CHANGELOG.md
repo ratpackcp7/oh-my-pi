@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- Subscription-backed status-line spend now renders as `sub $8.97` (or the subscription icon plus `$8.97`) instead of the ambiguous `S8.97` shorthand.
+- Scratch directories such as `~/tmp` no longer inherit and display Git branch/dirty state from a repository rooted above the scratch directory.
 - Fixed eval `agent()` treating an explicitly requested model as if it had to be an agent name: callers can now select a discovered agent capability and independently provide a model selector resolved through the live model registry, with the explicit model taking precedence over configured agent/role defaults.
 - Fixed the default status line dropping the elapsed-time metric on narrow phone/tmux terminals: wrap priority now keeps `time_spent` with model and context instead of clipping it behind cache, cost, and other secondary segments. Throughput (`token_rate` / tok/s) is dropped first under zoom so it no longer crowds out elapsed time.
 - Fixed the status-line model label cutting version/name fragments with an ellipsis at narrow widths; it now compresses redundant provider words and filler first and keeps provider + version + distinguishing qualifier when those pieces can physically fit.
