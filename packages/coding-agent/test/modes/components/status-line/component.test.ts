@@ -123,7 +123,6 @@ describe("StatusLineComponent", () => {
 		expect(strip(antigravity.getTopBorder(100).content)).toContain("AG·Opus 5");
 	});
 
-
 	it("fingerprints tool-call arguments containing bigint values", () => {
 		const statusLine = new StatusLineComponent(
 			makeSessionWithLastMessage({

@@ -541,7 +541,10 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				if (resolved) {
 					const fallbackPrefix = isFallback ? "↪ " : "";
 					const compact = compactModelIdentity(resolved);
-					const modelBudget = Math.max(10, columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - 12);
+					const modelBudget = Math.max(
+						10,
+						columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - 12,
+					);
 					modelSuffix = `  ${theme.fg("muted", fallbackPrefix + truncateToWidth(compact, modelBudget))}`;
 				}
 				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}${modelSuffix}`;
@@ -551,7 +554,11 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				if (distinctDescription) {
 					const budget = Math.max(
 						TRUNCATE_LENGTHS.SHORT,
-						columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - visibleWidth(resolved ?? "") - 14,
+						columns -
+							visibleWidth(displayId) -
+							visibleWidth(Bun.stripANSI(badge)) -
+							visibleWidth(resolved ?? "") -
+							14,
 					);
 					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
 					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
@@ -984,7 +991,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusLine.setVibeWorkerTokenRateProvider(() =>
 			aggregateVibeWorkerTokensPerSecond(this.session.getAgentId() ?? MAIN_AGENT_ID),
 		);
-
 
 		this.hideToolActivity = settings.get("display.hideToolActivity");
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);

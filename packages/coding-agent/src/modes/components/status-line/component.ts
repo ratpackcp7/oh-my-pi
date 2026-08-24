@@ -1377,10 +1377,7 @@ export class StatusLineComponent implements Component {
 		return this.#vibeWorkerTokenRate?.() ?? null;
 	}
 
-	#formatUsageContextKey(
-		activeProvider: string | undefined,
-		identity: OAuthAccountIdentity | undefined,
-	): string {
+	#formatUsageContextKey(activeProvider: string | undefined, identity: OAuthAccountIdentity | undefined): string {
 		if (!activeProvider) return "";
 		return [
 			activeProvider,
