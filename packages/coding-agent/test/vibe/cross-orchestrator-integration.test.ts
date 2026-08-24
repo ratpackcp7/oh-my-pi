@@ -220,6 +220,76 @@ describe("F1-F20 cross-orchestrator integration", () => {
     spy.mockRestore();
   });
 
+  it("F13 persisted route unavailable surfaces replacement requirement", async () => {
+    const fakeParentFile = "/tmp/fake-parent2/parent.jsonl";
+    const fakeManager: any = {
+      getSessionId: () => "parent-session",
+      getSessionFile: () => fakeParentFile,
+      getEntries: () => [],
+      getBranch: () => [],
+      appendCustomEntry: () => {},
+      flush: async () => {},
+      ensureOnDisk: async () => {},
+    };
+    const fakeSpawnEvent: any = {
+      version: 2,
+      id: "test-unavail-id",
+      ownerId: "Main",
+      parentSessionId: "parent-session",
+      action: "spawn",
+      role: "implementer",
+      agent: "task",
+      childSessionFile: "test-unavail-id.jsonl",
+      createdAt: Date.now(),
+      modelOverride: ["anthropic/old-model-not-available"],
+      modelRole: "task",
+    };
+    const entries = [
+      { type: "custom", customType: "vibe-session-lifecycle", data: fakeSpawnEvent, timestamp: new Date().toISOString() },
+      { type: "custom", customType: "vibe-session-lifecycle", data: { version: 2, id: "test-unavail-id", ownerId: "Main", parentSessionId: "parent-session", action: "turn-started", turn: 1 }, timestamp: new Date().toISOString() },
+      { type: "custom", customType: "vibe-session-lifecycle", data: { version: 2, id: "test-unavail-id", ownerId: "Main", parentSessionId: "parent-session", action: "turn-settled", turn: 1 }, timestamp: new Date().toISOString() },
+    ];
+    fakeManager.getEntries = () => entries;
+    fakeManager.getBranch = () => entries;
+    const peekSpy = vi.spyOn(SessionManager, "peekSessionInit").mockResolvedValue({ cwd: "/tmp", init: { systemPrompt: "x", tools: [] } } as any);
+    // Model registry that does NOT contain the old model
+    const fakeRegistry = {
+      getAvailable: () => [{ provider: "anthropic", id: "claude-sonnet-4" }], // old-model-not-available not here
+    } as any;
+    const sess: ToolSession = {
+      cwd: "/tmp",
+      settings: Settings.isolated(),
+      asyncJobManager: new AsyncJobManager({ onJobComplete: () => {} }),
+      getSessionId: () => "parent-session",
+      getSessionFile: () => fakeParentFile,
+      getArtifactsDir: () => "/tmp/fake-parent2",
+      getActiveModelString: () => undefined,
+      getModelString: () => undefined,
+      sessionManager: fakeManager,
+      modelRegistry: fakeRegistry,
+    } as unknown as ToolSession;
+    const restored = await VibeSessionRegistry.global().rehydrate(sess as any);
+    expect(restored).toBeGreaterThan(0);
+    const after = VibeSessionRegistry.global().screens(sess).find(s => s.id === "test-unavail-id");
+    expect(after).toBeDefined();
+    expect(after?.state).toBe("dead");
+    peekSpy.mockRestore();
+  });
+
+  it("F14 dead worker not silently resurrected", async () => {
+    const settings = Settings.isolated();
+    const sess = makeParentSession(settings);
+    const reg = VibeSessionRegistry.global();
+    const spy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (opts:any) => ({ index:0, id:opts.id, agent:opts.agent.name, agentSource:"bundled", task:opts.task, exitCode:0, output:"ok", stderr:"", truncated:false, durationMs:1, tokens:0, requests:0 } as any));
+    const { id } = await reg.spawn(sess, { cli: "fast", prompt: "first" });
+    // Kill it
+    await reg.kill(sess, id);
+    expect(reg.listIds(sess).length).toBe(0);
+    // Try to send to dead should fail, not silently revive
+    await expect(reg.send(sess, { session: id, message: "second" })).rejects.toThrow(/dead/);
+    spy.mockRestore();
+  });
+
   it("F19 truthful metadata display", async () => {
     const settings = Settings.isolated();
     const reg = VibeSessionRegistry.global();
