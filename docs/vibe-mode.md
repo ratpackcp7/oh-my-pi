@@ -32,15 +32,61 @@ Every worker is a real, keep-alive task-executor subagent with the normal coding
 
 The tier always selects the bundled `sonic` or `task` definition, not a same-named discovered custom agent. Model resolution otherwise matches task-agent routing: `task.agentModelOverrides.sonic` / `.task` wins over the bundled agent model, and role aliases resolve through `modelRoles`, with the parent active/default model as fallback.
 
+## Generic role-oriented workers (CP7 integration)
+
+For managed, policy-driven use (CP7 orchestrator / Foreman), `vibe_spawn` also accepts a generic role-oriented shape. This is the same persistent Vibe worker; only the routing identity differs. `cli` (`fast`/`good`) remains fully backward compatible.
+
+| Role | Bundled agent | Typical intent | Use for |
+|------|---------------|----------------|---------|
+| `scout` | `scout` | `cheap` | Read-only reconnaissance |
+| `utility` | `sonic` | `cheap` | Mechanical edits, data collection |
+| `implementer` | `task` | `strong` | Bounded implementation + tests |
+| `designer` | `designer` | `strong` | UI/interface shaping |
+| `planner` | `task` | `strong` | Decomposition |
+| `reviewer` | `reviewer` | `strong` | Independent review (never same model/family as implementer) |
+
+New `vibe_spawn` fields (all optional, generic — no CP7 paths/imports in OMP core):
+
+```ts
+{
+  cli?: "fast" | "good",                 // legacy tier, still valid
+  role?: "scout" | "utility" | "implementer" | "designer" | "planner" | "reviewer",
+  model?: string | string[],             // explicit pin, bypasses router; PIN_UNAVAILABLE if not in verified registry
+  intent?: "default" | "cheap" | "normal" | "strong" | "vision" | "large-context" | "same-pool-ok",
+  routing?: {
+    excludePools?: string[],             // e.g. ["anthropic"] to avoid parent pool
+    preferPools?: string[],
+    allowParentPool?: boolean,           // false => fail-closed when only parent pool remains
+    deadSelectors?: string[],            // exact selectors to exclude (reviewer independence via family expansion in adapter)
+  },
+  metadata?: {
+    externalTaskId?: string,             // Foreman task id (generic, opaque to Vibe core)
+    specPath?: string,
+    policyHash?: string,
+    policyRevision?: string,
+    label?: string,
+  },
+  prompt: string,
+  name?: string,
+}
+```
+
+Rules:
+- Provide either `cli` or `role` (not both, not neither); unknown `role` fails clearly with supported list.
+- `role` selects the bundled agent via a tiny `VIBE_ROLE_AGENT` table; routing intent/pool handling reuses the native OMP task router (`task.routing.*` settings + `buildRoutingSnapshot` + `routeWorker`). No CP7 policy tables are copied into OMP.
+- `model` is an explicit pin (like `agent(..., { model })`); if the pin is not in the verified `omp models --json` registry, spawn fails `PIN_UNAVAILABLE` with no silent substitution.
+- Reviewer independence is enforced by the CP7 adapter (`rails/omp-orchestrator/vibe_adapter.py`) which expands the implementer's **actual served** model family (from `policy.json` families) into `deadSelectors` before spawning the reviewer. OMP core only sees generic `deadSelectors`.
+- Foreman linkage is adapter-driven: Vibe stores `metadata` opaquely and surfaces it in `vibe_list` / TV wall (`task:<id>` badge), but never mutates Foreman state. Use `rails/foreman/vibe_foreman_bridge.py` to adopt results idempotently.
+
 ## Worker-control tools
 
 | Tool         | Input and behavior                                                                                                                                                                                   |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `vibe_spawn` | `{ cli: "fast" \| "good", prompt, name? }`. Starts a blank worker with a complete, self-contained first brief. `name` is sanitized/capped at 48 characters; an id is generated when omitted.         |
+| `vibe_spawn` | `{ cli?: "fast" \| "good", role?: "scout"\|"utility"\|"implementer"\|"designer"\|"planner"\|"reviewer", model?: string\|string[], intent?, routing?, metadata?, prompt, name? }` — see above. `name` sanitized/capped at 48 chars; id generated when omitted. |
 | `vibe_send`  | `{ session, message }`. Steers a streaming turn at its next step; if a turn exists but cannot be steered, queues an automatic next turn; if idle/parked, starts the next turn immediately.           |
 | `vibe_wait`  | `{ sessions?, timeout? }`. Waits for the first watched turn to settle (all in-flight workers when omitted), default 30 seconds. It acknowledges settled jobs so their result is not delivered twice. |
 | `vibe_kill`  | `{ session }`. Cancels an in-flight turn, clears queued messages, releases the worker, and retains any initialized transcript at `history://<id>`.                                                   |
-| `vibe_list`  | `{}`. Lists sessions in spawn order with tier, state, turn/queue counts, resolved model, and recent activity.                                                                                        |
+| `vibe_list`  | `{}`. Lists sessions in spawn order with tier/role, state, turn/queue counts, planned vs actual model, intent, external task link, and recent activity.                                              |
 
 Spawn and send return immediately. Each worker-turn result self-delivers into the director conversation through the async job manager; long response text is preview-capped there, with full output available at `agent://<id>`. Running `fast` and `good` workers on independent workstreams concurrently is the normal shape.
 

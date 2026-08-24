@@ -50,9 +50,31 @@ import {
 export const VIBE_TOOL_NAMES = ["vibe_spawn", "vibe_send", "vibe_wait", "vibe_kill", "vibe_list"] as const;
 
 const vibeSpawnSchema = type({
-	cli: type("'fast' | 'good'").describe(
-		"worker flavor: fast = low-latency model for mechanical work; good = strong model for hard work",
+	"cli?": type("'fast' | 'good'").describe(
+		"worker flavor: fast = low-latency model for mechanical work; good = strong model for hard work (legacy; prefer role)",
 	),
+	"role?": type("'scout' | 'utility' | 'implementer' | 'designer' | 'planner' | 'reviewer'").describe(
+		"generic role for routing (scout, utility, implementer, designer, planner, reviewer)",
+	),
+	"model?": type("string | string[]").describe(
+		"explicit model selector pin (bypasses routing; fails PIN_UNAVAILABLE if unavailable)",
+	),
+	"intent?": type("'default' | 'cheap' | 'normal' | 'strong' | 'vision' | 'large-context' | 'same-pool-ok'").describe(
+		"generic routing intent",
+	),
+	"routing?": type({
+		"excludePools?": "string[]",
+		"preferPools?": "string[]",
+		"allowParentPool?": "boolean",
+		"deadSelectors?": "string[]",
+	}).describe("generic routing constraints (pool protection, dead selectors for reviewer independence)"),
+	"metadata?": type({
+		"externalTaskId?": "string",
+		"specPath?": "string",
+		"policyHash?": "string",
+		"policyRevision?": "string",
+		"label?": "string",
+	}).describe("generic external linkage (Foreman task/spec, policy identity)"),
 	"name?": type("string <= 48").describe("optional session name; generated when omitted"),
 	prompt: type("string > 0").describe("first instruction; the worker starts with no other context"),
 });
@@ -104,7 +126,7 @@ export class VibeSpawnTool implements AgentTool<typeof vibeSpawnSchema, VibeTool
 	readonly name = "vibe_spawn";
 	readonly approval = "exec" as const;
 	readonly label = "Vibe Spawn";
-	readonly summary = "Start a persistent fast/good worker session";
+	readonly summary = "Start a persistent worker session (cli or role)";
 	readonly description: string;
 	readonly parameters = vibeSpawnSchema;
 	readonly strict = true;
@@ -113,10 +135,18 @@ export class VibeSpawnTool implements AgentTool<typeof vibeSpawnSchema, VibeTool
 	}
 
 	async execute(_toolCallId: string, params: typeof vibeSpawnSchema.infer): Promise<AgentToolResult<VibeToolDetails>> {
-		const { id, jobId } = await VibeSessionRegistry.global().spawn(this.session, params);
+		const { id, jobId } = await VibeSessionRegistry.global().spawn(
+			this.session,
+			params as unknown as Parameters<VibeSessionRegistry["spawn"]>[1],
+		);
+		const label = params.role ? `role:${params.role}` : params.cli;
 		return textResult(
-			`Spawned ${params.cli} session \`${id}\` (turn job \`${jobId}\`). The turn result will be delivered when it finishes — keep directing other sessions meanwhile. Continue this one with vibe_send \`${id}\`.`,
-			{ op: "spawn", screens: screensOf(this.session), spawned: { id, cli: params.cli, jobId } },
+			`Spawned ${label} session \`${id}\` (turn job \`${jobId}\`). The turn result will be delivered when it finishes — keep directing other sessions meanwhile. Continue this one with vibe_send \`${id}\`.`,
+			{
+				op: "spawn",
+				screens: screensOf(this.session),
+				spawned: { id, cli: (params.cli as VibeCli) ?? "good", jobId },
+			},
 		);
 	}
 }
@@ -264,12 +294,18 @@ export class VibeListTool implements AgentTool<typeof vibeListSchema, VibeToolDe
 			return textResult("No vibe sessions. Spawn one with vibe_spawn.", details);
 		}
 		const lines = screens.map(screen => {
+			const roleOrCli = screen.role ?? screen.cli ?? "task";
 			const parts = [
-				`- \`${screen.id}\` [${screen.cli}] ${screen.state}`,
+				`- \`${screen.id}\` [${roleOrCli}] ${screen.state}`,
 				`${screen.turns} turn${screen.turns === 1 ? "" : "s"}`,
 			];
 			if (screen.queued > 0) parts.push(`${screen.queued} queued`);
 			if (screen.model) parts.push(screen.model);
+			else if (screen.plannedModel) parts.push(screen.plannedModel);
+			if (screen.plannedModel && screen.model && screen.plannedModel !== screen.model)
+				parts.push(`planned:${screen.plannedModel}`);
+			if (screen.intent && screen.intent !== "default") parts.push(`intent:${screen.intent}`);
+			if (screen.metadata?.externalTaskId) parts.push(`task:${screen.metadata.externalTaskId}`);
 			if (screen.lastActivity) parts.push(`last: ${screen.lastActivity}`);
 			return parts.join(" · ");
 		});
@@ -392,7 +428,8 @@ function tvScreen(
 		uiTheme,
 		spinnerFrame,
 	);
-	const badge = formatBadge(screen.cli, stateToColor(screen.state), uiTheme);
+	const roleOrCli = screen.role ?? screen.cli ?? "task";
+	const badge = formatBadge(roleOrCli, stateToColor(screen.state), uiTheme);
 	const idText =
 		live && options.spinnerFrame !== undefined && shimmerEnabled()
 			? shimmerText(screen.id, uiTheme)
@@ -404,8 +441,13 @@ function tvScreen(
 		headParts.push(uiTheme.fg("dim", formatDuration(Date.now() - screen.turnStartedAt)));
 	}
 	if (screen.model) headParts.push(uiTheme.fg("muted", frameText(screen.model, 40)));
-
-	const body: string[] = [];
+	else if (screen.plannedModel) headParts.push(uiTheme.fg("muted", frameText(screen.plannedModel, 40)));
+	if (screen.plannedModel && screen.model && screen.plannedModel !== screen.model) {
+		headParts.push(uiTheme.fg("dim", `planned:${frameText(screen.plannedModel, 20)}`));
+	}
+	if (screen.intent && screen.intent !== "default") headParts.push(uiTheme.fg("dim", screen.intent));
+	if (screen.metadata?.externalTaskId)
+		headParts.push(uiTheme.fg("dim", `task:${frameText(screen.metadata.externalTaskId, 16)}`));
 	const hook = uiTheme.tree.hook;
 	if (live) {
 		if (screen.turnMessage) {
