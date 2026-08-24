@@ -56,8 +56,12 @@ const vibeSpawnSchema = type({
 	"role?": type("'scout' | 'utility' | 'implementer' | 'designer' | 'planner' | 'reviewer'").describe(
 		"generic role for routing (scout, utility, implementer, designer, planner, reviewer)",
 	),
-	"model?": type("string | string[]").describe("explicit model selector pin (bypasses routing; fails PIN_UNAVAILABLE if unavailable)"),
-	"intent?": type("'default' | 'cheap' | 'normal' | 'strong' | 'vision' | 'large-context' | 'same-pool-ok'").describe("generic routing intent"),
+	"model?": type("string | string[]").describe(
+		"explicit model selector pin (bypasses routing; fails PIN_UNAVAILABLE if unavailable)",
+	),
+	"intent?": type("'default' | 'cheap' | 'normal' | 'strong' | 'vision' | 'large-context' | 'same-pool-ok'").describe(
+		"generic routing intent",
+	),
 	"routing?": type({
 		"excludePools?": "string[]",
 		"preferPools?": "string[]",
@@ -131,11 +135,18 @@ export class VibeSpawnTool implements AgentTool<typeof vibeSpawnSchema, VibeTool
 	}
 
 	async execute(_toolCallId: string, params: typeof vibeSpawnSchema.infer): Promise<AgentToolResult<VibeToolDetails>> {
-		const { id, jobId } = await VibeSessionRegistry.global().spawn(this.session, params as unknown as Parameters<VibeSessionRegistry["spawn"]>[1]);
+		const { id, jobId } = await VibeSessionRegistry.global().spawn(
+			this.session,
+			params as unknown as Parameters<VibeSessionRegistry["spawn"]>[1],
+		);
 		const label = params.role ? `role:${params.role}` : params.cli;
 		return textResult(
 			`Spawned ${label} session \`${id}\` (turn job \`${jobId}\`). The turn result will be delivered when it finishes — keep directing other sessions meanwhile. Continue this one with vibe_send \`${id}\`.`,
-			{ op: "spawn", screens: screensOf(this.session), spawned: { id, cli: (params.cli as VibeCli) ?? "good", jobId } },
+			{
+				op: "spawn",
+				screens: screensOf(this.session),
+				spawned: { id, cli: (params.cli as VibeCli) ?? "good", jobId },
+			},
 		);
 	}
 }
@@ -291,7 +302,8 @@ export class VibeListTool implements AgentTool<typeof vibeListSchema, VibeToolDe
 			if (screen.queued > 0) parts.push(`${screen.queued} queued`);
 			if (screen.model) parts.push(screen.model);
 			else if (screen.plannedModel) parts.push(screen.plannedModel);
-			if (screen.plannedModel && screen.model && screen.plannedModel !== screen.model) parts.push(`planned:${screen.plannedModel}`);
+			if (screen.plannedModel && screen.model && screen.plannedModel !== screen.model)
+				parts.push(`planned:${screen.plannedModel}`);
 			if (screen.intent && screen.intent !== "default") parts.push(`intent:${screen.intent}`);
 			if (screen.metadata?.externalTaskId) parts.push(`task:${screen.metadata.externalTaskId}`);
 			if (screen.lastActivity) parts.push(`last: ${screen.lastActivity}`);
@@ -434,7 +446,8 @@ function tvScreen(
 		headParts.push(uiTheme.fg("dim", `planned:${frameText(screen.plannedModel, 20)}`));
 	}
 	if (screen.intent && screen.intent !== "default") headParts.push(uiTheme.fg("dim", screen.intent));
-	if (screen.metadata?.externalTaskId) headParts.push(uiTheme.fg("dim", `task:${frameText(screen.metadata.externalTaskId, 16)}`));
+	if (screen.metadata?.externalTaskId)
+		headParts.push(uiTheme.fg("dim", `task:${frameText(screen.metadata.externalTaskId, 16)}`));
 	const hook = uiTheme.tree.hook;
 	if (live) {
 		if (screen.turnMessage) {

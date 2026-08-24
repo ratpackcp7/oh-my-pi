@@ -30,8 +30,8 @@ import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
-import { getRoutingPolicyFromSettings, buildRoutingSnapshot } from "../task/routing/snapshot";
 import { routeWorker } from "../task/routing/router";
+import { buildRoutingSnapshot, getRoutingPolicyFromSettings } from "../task/routing/snapshot";
 import type { RoutingIntent, RoutingRequirements } from "../task/routing/types";
 import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
 import type { ToolSession } from "../tools";
@@ -382,7 +382,8 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 
 function parseLifecycleEvent(value: unknown): VibeLifecycleEvent | undefined {
 	const data = objectRecord(value);
-	if (!data || (data.version !== VIBE_LIFECYCLE_VERSION && data.version !== VIBE_LIFECYCLE_LEGACY_VERSION)) return undefined;
+	if (!data || (data.version !== VIBE_LIFECYCLE_VERSION && data.version !== VIBE_LIFECYCLE_LEGACY_VERSION))
+		return undefined;
 	if (typeof data.id !== "string" || !data.id) return undefined;
 	if (typeof data.ownerId !== "string" || !data.ownerId) return undefined;
 	if (typeof data.parentSessionId !== "string" || !data.parentSessionId) return undefined;
@@ -398,20 +399,37 @@ function parseLifecycleEvent(value: unknown): VibeLifecycleEvent | undefined {
 		const isV2 = data.version === VIBE_LIFECYCLE_VERSION;
 		if (isV2) {
 			const cli = data.cli === "fast" || data.cli === "good" ? (data.cli as VibeCli) : undefined;
-			const role = typeof data.role === "string" && (VIBE_ROLE_AGENT as Record<string, string>)[data.role] ? (data.role as VibeRole) : undefined;
+			const role =
+				typeof data.role === "string" && (VIBE_ROLE_AGENT as Record<string, string>)[data.role]
+					? (data.role as VibeRole)
+					: undefined;
 			if (!cli && !role) return undefined;
 			// Validate optional fields types lightly
-			const modelOverride = data.modelOverride === undefined ? undefined : Array.isArray(data.modelOverride) ? (data.modelOverride as string[]) : typeof data.modelOverride === "string" ? [data.modelOverride as string] : undefined;
+			const modelOverride =
+				data.modelOverride === undefined
+					? undefined
+					: Array.isArray(data.modelOverride)
+						? (data.modelOverride as string[])
+						: typeof data.modelOverride === "string"
+							? [data.modelOverride as string]
+							: undefined;
 			const modelRole = typeof data.modelRole === "string" ? data.modelRole : undefined;
-			const intent = typeof data.intent === "string" && ["default","cheap","normal","strong","vision","large-context","same-pool-ok"].includes(data.intent) ? (data.intent as VibeRoutingIntent) : undefined;
+			const intent =
+				typeof data.intent === "string" &&
+				["default", "cheap", "normal", "strong", "vision", "large-context", "same-pool-ok"].includes(data.intent)
+					? (data.intent as VibeRoutingIntent)
+					: undefined;
 			let routing: VibeRoutingOptions | undefined;
 			if (data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)) {
 				const r = data.routing as Record<string, unknown>;
 				routing = {};
-				if (Array.isArray(r.excludePools)) routing.excludePools = r.excludePools.filter((v): v is string => typeof v === "string");
-				if (Array.isArray(r.preferPools)) routing.preferPools = r.preferPools.filter((v): v is string => typeof v === "string");
+				if (Array.isArray(r.excludePools))
+					routing.excludePools = r.excludePools.filter((v): v is string => typeof v === "string");
+				if (Array.isArray(r.preferPools))
+					routing.preferPools = r.preferPools.filter((v): v is string => typeof v === "string");
 				if (typeof r.allowParentPool === "boolean") routing.allowParentPool = r.allowParentPool;
-				if (Array.isArray(r.deadSelectors)) routing.deadSelectors = r.deadSelectors.filter((v): v is string => typeof v === "string");
+				if (Array.isArray(r.deadSelectors))
+					routing.deadSelectors = r.deadSelectors.filter((v): v is string => typeof v === "string");
 			}
 			let metadata: VibeExternalMetadata | undefined;
 			if (data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata)) {
@@ -627,10 +645,16 @@ export class VibeSessionRegistry {
 	async #resolveRoleWorker(
 		session: VibeParentSession,
 		role: VibeRole,
-		options: { model?: string | string[]; intent?: VibeRoutingIntent; routing?: VibeRoutingOptions; metadata?: VibeExternalMetadata },
+		options: {
+			model?: string | string[];
+			intent?: VibeRoutingIntent;
+			routing?: VibeRoutingOptions;
+			metadata?: VibeExternalMetadata;
+		},
 	): Promise<ResolvedVibeWorker> {
 		const agentName = VIBE_ROLE_AGENT[role];
-		if (!agentName) throw new ToolError(`Unknown vibe role "${role}". Supported: ${Object.keys(VIBE_ROLE_AGENT).join(", ")}`);
+		if (!agentName)
+			throw new ToolError(`Unknown vibe role "${role}". Supported: ${Object.keys(VIBE_ROLE_AGENT).join(", ")}`);
 		const agent = getBundledAgent(agentName);
 		if (!agent) throw new ToolError(`Bundled agent "${agentName}" for vibe role "${role}" is unavailable.`);
 		const agentModelOverrides = session.settings.get("task.agentModelOverrides");
@@ -641,8 +665,10 @@ export class VibeSessionRegistry {
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
 		});
-		let modelOverride: string[] | undefined = initialPatterns.length > 0 ? initialPatterns : undefined;
-		const hasExplicitPin = options.model !== undefined && (Array.isArray(options.model) ? options.model.length > 0 : options.model.trim().length > 0);
+		const modelOverride: string[] | undefined = initialPatterns.length > 0 ? initialPatterns : undefined;
+		const hasExplicitPin =
+			options.model !== undefined &&
+			(Array.isArray(options.model) ? options.model.length > 0 : options.model.trim().length > 0);
 		if (hasExplicitPin) {
 			const pins = Array.isArray(options.model) ? options.model : [options.model as string];
 			const trimmed = pins.map(p => p.trim()).filter(Boolean);
@@ -650,20 +676,46 @@ export class VibeSessionRegistry {
 			const modelRegistry = (session as unknown as ToolSession).modelRegistry;
 			if (modelRegistry) {
 				const available = modelRegistry.getAvailable?.() ?? [];
-				const selectorSet = new Set(available.map((m: { provider: string; id: string }) => `${m.provider}/${m.id}`.toLowerCase()));
+				const selectorSet = new Set(
+					available.map((m: { provider: string; id: string }) => `${m.provider}/${m.id}`.toLowerCase()),
+				);
 				for (const pin of trimmed) {
 					const base = pin.split("@")[0].split(":")[0].toLowerCase();
 					let found = selectorSet.has(base);
 					if (!found && !base.includes("/")) {
-						for (const sel of selectorSet) if (sel.endsWith(`/${base}`)) { found = true; break; }
+						for (const sel of selectorSet)
+							if (sel.endsWith(`/${base}`)) {
+								found = true;
+								break;
+							}
 					}
-					if (!found) throw new ToolError(`PIN_UNAVAILABLE: selector "${pin}" not present in the verified model registry`);
+					if (!found)
+						throw new ToolError(`PIN_UNAVAILABLE: selector "${pin}" not present in the verified model registry`);
 				}
 			}
-			return { agent, modelOverride: trimmed, modelRole: undefined, role, intent: options.intent, routing: options.routing, metadata: options.metadata };
+			return {
+				agent,
+				modelOverride: trimmed,
+				modelRole: undefined,
+				role,
+				intent: options.intent,
+				routing: options.routing,
+				metadata: options.metadata,
+			};
 		}
-		const validIntents = new Set<VibeRoutingIntent>(["default","cheap","normal","strong","vision","large-context","same-pool-ok"]);
-		const routingIntent: VibeRoutingIntent = options.intent && validIntents.has(options.intent) ? options.intent : "default";
+		// Intent validation is vanilla-friendly: unknown/malformed intent silently defaults to "default"
+		// rather than throwing, so existing callers without intent continue to work.
+		const validIntents = new Set<VibeRoutingIntent>([
+			"default",
+			"cheap",
+			"normal",
+			"strong",
+			"vision",
+			"large-context",
+			"same-pool-ok",
+		]);
+		const routingIntent: VibeRoutingIntent =
+			options.intent && validIntents.has(options.intent) ? options.intent : "default";
 		const policyFromSettings = getRoutingPolicyFromSettings(session as unknown as ToolSession);
 		const policy = {
 			enabled: policyFromSettings.enabled,
@@ -673,20 +725,35 @@ export class VibeSessionRegistry {
 			preferPools: [...policyFromSettings.preferPools],
 		};
 		if (options.routing) {
-			if (options.routing.excludePools) policy.excludePools = [...policy.excludePools, ...options.routing.excludePools];
+			if (options.routing.excludePools)
+				policy.excludePools = [...policy.excludePools, ...options.routing.excludePools];
 			if (options.routing.preferPools) policy.preferPools = [...policy.preferPools, ...options.routing.preferPools];
 			if (options.routing.allowParentPool !== undefined) {
 				policy.avoidParentPool = !options.routing.allowParentPool;
 				policy.parentPoolFallback = options.routing.allowParentPool ? "allow" : "deny";
 			}
 		}
-		if (!policy.enabled) return { agent, modelOverride, modelRole, role, intent: routingIntent, routing: options.routing, metadata: options.metadata };
+		if (!policy.enabled)
+			return {
+				agent,
+				modelOverride,
+				modelRole,
+				role,
+				intent: routingIntent,
+				routing: options.routing,
+				metadata: options.metadata,
+			};
 		try {
 			const snapshot = await buildRoutingSnapshot(session as unknown as ToolSession);
 			const candidates = snapshot.candidates;
 			const parentPool = snapshot.parentPool;
 			const preferredSelector = modelOverride?.[0];
-			if (preferredSelector) for (const cand of candidates) if (cand.selector === preferredSelector) { cand.preferredRank = 0; break; }
+			if (preferredSelector)
+				for (const cand of candidates)
+					if (cand.selector === preferredSelector) {
+						cand.preferredRank = 0;
+						break;
+					}
 			const routingRequest = {
 				agent: agentName,
 				intent: routingIntent as unknown as RoutingIntent,
@@ -700,13 +767,32 @@ export class VibeSessionRegistry {
 			};
 			const outcome = routeWorker(routingRequest);
 			if (!outcome.ok) {
-				if (outcome.code === "parent_pool_fail_closed" || outcome.code === "no_viable_candidate") throw new ToolError(outcome.reason);
-				return { agent, modelOverride, modelRole, role, intent: routingIntent, routing: options.routing, metadata: options.metadata };
+				if (outcome.code === "parent_pool_fail_closed" || outcome.code === "no_viable_candidate")
+					throw new ToolError(outcome.reason);
+				if (outcome.code === "routing_disabled")
+					return {
+						agent,
+						modelOverride,
+						modelRole,
+						role,
+						intent: routingIntent,
+						routing: options.routing,
+						metadata: options.metadata,
+					};
+				throw new ToolError(`routing failed: ${outcome.reason} (${outcome.code})`);
 			}
-			return { agent, modelOverride: outcome.selectors, modelRole, role, intent: routingIntent, routing: options.routing, metadata: options.metadata };
+			return {
+				agent,
+				modelOverride: outcome.selectors,
+				modelRole,
+				role,
+				intent: routingIntent,
+				routing: options.routing,
+				metadata: options.metadata,
+			};
 		} catch (error) {
 			if (error instanceof ToolError) throw error;
-			return { agent, modelOverride, modelRole, role, intent: routingIntent, routing: options.routing, metadata: options.metadata };
+			throw new ToolError(`routing failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
@@ -935,7 +1021,11 @@ export class VibeSessionRegistry {
 	): Promise<string | undefined> {
 		if (options?.requireAgentMatch !== false) {
 			const v2 = spawn as VibeSpawnLifecycleEventV2;
-			const expectedAgent = v2.cli ? VIBE_CLI_AGENT[v2.cli as VibeCli] : v2.role ? VIBE_ROLE_AGENT[v2.role as VibeRole] : undefined;
+			const expectedAgent = v2.cli
+				? VIBE_CLI_AGENT[v2.cli as VibeCli]
+				: v2.role
+					? VIBE_ROLE_AGENT[v2.role as VibeRole]
+					: undefined;
 			if (expectedAgent && spawn.agent !== expectedAgent) return undefined;
 			if (!expectedAgent && !spawn.agent) return undefined;
 		}
@@ -1122,9 +1212,15 @@ export class VibeSessionRegistry {
 					metadata: spawnV2.metadata,
 				};
 			} else if (spawnV2.role) {
-				// V2 role without persisted override (legacy V2 edge): recompute with role logic
+				// Edge: V2 role without persisted modelOverride is currently unreachable (all V2 spawns persist modelOverride)
+				// but if ever reached, recomputing via #resolveRoleWorker would violate route-once (§8.6).
+				// Kept only for backward compat with a hypothetical legacy V2 that didn't persist; otherwise continue.
 				try {
-					resolved = await this.#resolveRoleWorker(session, spawnV2.role as VibeRole, { intent: spawnV2.intent, routing: spawnV2.routing, metadata: spawnV2.metadata });
+					resolved = await this.#resolveRoleWorker(session, spawnV2.role as VibeRole, {
+						intent: spawnV2.intent,
+						routing: spawnV2.routing,
+						metadata: spawnV2.metadata,
+					});
 				} catch {
 					continue;
 				}
@@ -1134,17 +1230,27 @@ export class VibeSessionRegistry {
 				resolved = this.#resolveWorker(session, cli as VibeCli);
 			}
 			const { agent, modelOverride, modelRole } = resolved;
-			const plannedSelector = Array.isArray(modelOverride) ? modelOverride[0] : (modelOverride as string | undefined);
+			const plannedSelector = Array.isArray(modelOverride)
+				? modelOverride[0]
+				: (modelOverride as string | undefined);
 			const modelRegistry = (session as unknown as ToolSession).modelRegistry;
 			let persistedUnavailable = false;
 			if (plannedSelector && modelRegistry?.getAvailable) {
 				try {
 					const available = modelRegistry.getAvailable() ?? [];
-					const selectorSet = new Set((available as Array<{ provider: string; id: string }>).map(m => `${m.provider}/${m.id}`.toLowerCase()));
+					const selectorSet = new Set(
+						(available as Array<{ provider: string; id: string }>).map(m =>
+							`${m.provider}/${m.id}`.toLowerCase(),
+						),
+					);
 					const base = plannedSelector.split("@")[0].split(":")[0].toLowerCase();
 					let found = selectorSet.has(base);
 					if (!found && !base.includes("/")) {
-						for (const sel of selectorSet) if (sel.endsWith(`/${base}`)) { found = true; break; }
+						for (const sel of selectorSet)
+							if (sel.endsWith(`/${base}`)) {
+								found = true;
+								break;
+							}
 					}
 					if (!found) persistedUnavailable = true;
 				} catch {}
@@ -1238,7 +1344,16 @@ export class VibeSessionRegistry {
 	/** Spawn a persistent worker session and start its first turn in the background. */
 	async spawn(
 		session: ToolSession,
-		args: { cli?: VibeCli; role?: VibeRole; model?: string | string[]; intent?: VibeRoutingIntent; routing?: VibeRoutingOptions; metadata?: VibeExternalMetadata; name?: string; prompt: string },
+		args: {
+			cli?: VibeCli;
+			role?: VibeRole;
+			model?: string | string[];
+			intent?: VibeRoutingIntent;
+			routing?: VibeRoutingOptions;
+			metadata?: VibeExternalMetadata;
+			name?: string;
+			prompt: string;
+		},
 	): Promise<VibeSpawnOutcome> {
 		const scope = this.ownerScope(session);
 		return this.#withTerminationLock(scope, () => this.#spawnLocked(session, scope, args));
@@ -1247,20 +1362,39 @@ export class VibeSessionRegistry {
 	async #spawnLocked(
 		session: ToolSession,
 		scope: VibeOwnerScope,
-		args: { cli?: VibeCli; role?: VibeRole; model?: string | string[]; intent?: VibeRoutingIntent; routing?: VibeRoutingOptions; metadata?: VibeExternalMetadata; name?: string; prompt: string },
+		args: {
+			cli?: VibeCli;
+			role?: VibeRole;
+			model?: string | string[];
+			intent?: VibeRoutingIntent;
+			routing?: VibeRoutingOptions;
+			metadata?: VibeExternalMetadata;
+			name?: string;
+			prompt: string;
+		},
 	): Promise<VibeSpawnOutcome> {
 		if (this.#terminatedScopes.has(scopeKey(scope, ""))) {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
 		}
 		const manager = this.#manager(session);
 		// Validate args: require cli or role
-		if (!args.cli && !args.role) throw new ToolError(`vibe_spawn requires "cli" ("fast"|"good") or "role" (${Object.keys(VIBE_ROLE_AGENT).join("|")})`);
+		if (!args.cli && !args.role)
+			throw new ToolError(
+				`vibe_spawn requires "cli" ("fast"|"good") or "role" (${Object.keys(VIBE_ROLE_AGENT).join("|")})`,
+			);
 		if (args.cli && args.role) throw new ToolError(`vibe_spawn: provide either "cli" or "role", not both`);
-		if (args.role && !(args.role in VIBE_ROLE_AGENT)) throw new ToolError(`Unknown vibe role "${args.role}". Supported: ${Object.keys(VIBE_ROLE_AGENT).join(", ")}`);
-		if (args.cli && args.cli !== "fast" && args.cli !== "good") throw new ToolError(`Unknown vibe cli "${args.cli}". Supported: fast, good`);
+		if (args.role && !(args.role in VIBE_ROLE_AGENT))
+			throw new ToolError(`Unknown vibe role "${args.role}". Supported: ${Object.keys(VIBE_ROLE_AGENT).join(", ")}`);
+		if (args.cli && args.cli !== "fast" && args.cli !== "good")
+			throw new ToolError(`Unknown vibe cli "${args.cli}". Supported: fast, good`);
 		let resolved: ResolvedVibeWorker;
 		if (args.role) {
-			resolved = await this.#resolveRoleWorker(session, args.role as VibeRole, { model: args.model, intent: args.intent, routing: args.routing, metadata: args.metadata });
+			resolved = await this.#resolveRoleWorker(session, args.role as VibeRole, {
+				model: args.model,
+				intent: args.intent,
+				routing: args.routing,
+				metadata: args.metadata,
+			});
 		} else {
 			const r = this.#resolveWorker(session, args.cli as VibeCli);
 			resolved = { ...r, role: undefined, intent: args.intent, routing: args.routing, metadata: args.metadata };
@@ -1272,12 +1406,22 @@ export class VibeSessionRegistry {
 				const modelRegistry = (session as unknown as ToolSession).modelRegistry;
 				if (modelRegistry) {
 					const available = modelRegistry.getAvailable?.() ?? [];
-					const selectorSet = new Set(available.map((m: { provider: string; id: string }) => `${m.provider}/${m.id}`.toLowerCase()));
+					const selectorSet = new Set(
+						available.map((m: { provider: string; id: string }) => `${m.provider}/${m.id}`.toLowerCase()),
+					);
 					for (const pin of trimmed) {
 						const base = pin.split("@")[0].split(":")[0].toLowerCase();
 						let found = selectorSet.has(base);
-						if (!found && !base.includes("/")) for (const sel of selectorSet) if (sel.endsWith(`/${base}`)) { found = true; break; }
-						if (!found) throw new ToolError(`PIN_UNAVAILABLE: selector "${pin}" not present in the verified model registry`);
+						if (!found && !base.includes("/"))
+							for (const sel of selectorSet)
+								if (sel.endsWith(`/${base}`)) {
+									found = true;
+									break;
+								}
+						if (!found)
+							throw new ToolError(
+								`PIN_UNAVAILABLE: selector "${pin}" not present in the verified model registry`,
+							);
 					}
 				}
 				resolved.modelOverride = trimmed;
@@ -1313,7 +1457,7 @@ export class VibeSessionRegistry {
 			intent: resolved.intent,
 			routing: resolved.routing,
 			metadata: resolved.metadata,
-			plannedModel: Array.isArray(modelOverride) ? modelOverride[0] : modelOverride as string | undefined,
+			plannedModel: Array.isArray(modelOverride) ? modelOverride[0] : (modelOverride as string | undefined),
 			state: "starting",
 			createdAt,
 			lastActivityAt: createdAt,
