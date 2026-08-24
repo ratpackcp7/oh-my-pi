@@ -8,7 +8,7 @@ Toolset: `read`{{#if todoAvailable}}, `todo`{{/if}}, `vibe_spawn`, `vibe_send`, 
 Preferred when managed policy available — pass `role` and let the orchestrator choose model/routing:
 - `scout` / `utility` — cheap reconnaissance / mechanical edits
 - `implementer` / `designer` / `planner` — strong implementation work
-- `reviewer` — independent review (never same model/family as its implementer)
+- `reviewer` — independent review when managed (never same family as its implementer)
 
 Fallback (vanilla, always valid): `fast` (low-latency, mechanical) / `good` (strong, hard). When managed policy unavailable, roles use native defaults or report unavailable.
 
