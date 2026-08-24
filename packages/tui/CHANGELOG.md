@@ -5,6 +5,25 @@
 ### Fixed
 
 - Fixed the editor exceeding its configured `maxHeight` when the status provider returns a multi-row top border. On terminals of six rows or fewer the two-row header previously rendered four total rows against a cap of three, eating the transcript space the small-terminal calculation reserves; header rows are now bounded so the cap holds while at least one content row stays visible ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+### Breaking Changes
+
+- Renamed TerminalFrameProvider.resetHistory to beginHistoryReplay
+
+### Fixed
+
+- Fixed graceful terminal shutdown leaving eligible finalized output in the mutable viewport instead of retiring it before shell handoff.
+
+## [18.0.4] - 2026-08-24
+
+### Changed
+
+- Significantly improved streaming Markdown rendering performance by caching unchanged rows, resuming boundary walks, and inspecting only text deltas for guard scans and OSC 8 normalization.
+
+### Fixed
+
+- Fixed TUI aborting when syntax highlighting fails during Markdown rendering by falling back to unhighlighted text.
+- Fixed Korean IME cursor drift in Orca by properly matching two-cell Hangul Compatibility Jamo rendering.
+
 ## [18.0.3] - 2026-08-23
 
 ### Fixed

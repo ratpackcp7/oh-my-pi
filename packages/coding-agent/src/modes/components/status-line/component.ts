@@ -593,7 +593,13 @@ export class StatusLineComponent implements Component {
 			classification.root && repository && !pathIsWithin(classification.root, repository.repoRoot),
 		);
 		if (suppressVcs) {
-			this.#activeRepoCache = { projectDir, activeRepo: null, effectiveGitCwd: projectDir, suppressVcs: true, worktree: null };
+			this.#activeRepoCache = {
+				projectDir,
+				activeRepo: null,
+				effectiveGitCwd: projectDir,
+				suppressVcs: true,
+				worktree: null,
+			};
 			return this.#activeRepoCache;
 		}
 
@@ -1888,7 +1894,8 @@ export class StatusLineComponent implements Component {
 			? this.#resolveActiveRepoCache()
 			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, suppressVcs: false, worktree: null };
 		const vcsVisible = !activeRepoCache.suppressVcs;
-		let gitBranch = vcsVisible && (includeGit || includePr) ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
+		let gitBranch =
+			vcsVisible && (includeGit || includePr) ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
 		// A jj repo has no git branch to read: git HEAD is detached (colocated) or
 		// absent. A pending reftable resolve owns this cwd as an explicit Git repo,
 		// so it must not be mistaken for an absent Git checkout and fall through to
@@ -1901,10 +1908,11 @@ export class StatusLineComponent implements Component {
 		if (vcsVisible && includeGit && gitHeadIsJjLike) {
 			gitBranch = this.#getJjBranch(activeRepoCache.effectiveGitCwd) ?? gitBranch;
 		}
-		const gitStatus = vcsVisible && includeGit
-			? ((gitHeadIsJjLike ? this.#getJjStatus(activeRepoCache.effectiveGitCwd) : null) ??
-				this.#getGitStatus(activeRepoCache.effectiveGitCwd))
-			: null;
+		const gitStatus =
+			vcsVisible && includeGit
+				? ((gitHeadIsJjLike ? this.#getJjStatus(activeRepoCache.effectiveGitCwd) : null) ??
+					this.#getGitStatus(activeRepoCache.effectiveGitCwd))
+				: null;
 		const gitPr = vcsVisible && includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);

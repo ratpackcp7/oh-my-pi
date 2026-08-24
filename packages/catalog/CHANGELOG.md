@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [18.0.4] - 2026-08-24
+
+### Fixed
+
+- Fixed default reasoning effort for `cursor/cursor-grok-4.5` and `cursor/cursor-grok-4.6` so requests without an explicit effort setting default to `-medium` instead of `-low`, preventing rate limit rejections on Cursor's Start plan ([#9478](https://github.com/can1357/oh-my-pi/issues/9478)).
+- Fixed aliased OpenCode Zen Ox Alpha models exposing incorrect effort levels, ensuring the gateway's native `low`, `high`, and `max` tiers are correctly mapped and reachable ([#9349](https://github.com/can1357/oh-my-pi/issues/9349)).
+- Fixed missing rate card tier for public xAI and SuperGrok models with prompt lengths exceeding 200K tokens ([#9512](https://github.com/can1357/oh-my-pi/issues/9512)).
+
 ## [18.0.2] - 2026-08-23
 
 ### Fixed
@@ -43,6 +51,7 @@
 
 ### Added
 
+- Added DeepInfra as a built-in provider (`deepinfra`, `DEEPINFRA_API_KEY`) with dynamic model discovery from DeepInfra's public tagged catalog: chat models, context windows, per-1M-token pricing (including cache reads), vision input, and reasoning-effort support all come from the API at discovery time (output-token caps fall back to bundled/stencil.so references — the catalog’s `max_tokens` restates the context ceiling, and a bundled cap is clamped to the window DeepInfra actually serves). DeepInfra’s discovered modality list is authoritative through the refresh merge, so a model that loses its `vision`/`vlm` tags stops advertising image input instead of retaining it from the bundled reference.
 - Added helper functions and constants for reading enterprise ChatGPT workspace data-residency regions from Codex OAuth access tokens and forwarding the residency header to Codex backend endpoints.
 
 ### Changed
