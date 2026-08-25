@@ -740,6 +740,8 @@ export interface RunOptions {
 	label?: string;
 	sessionsRoot?: string;
 	timeoutMs?: number;
+	thinking?: string;
+	configFiles?: string[];
 }
 
 const CLI_ENTRY = path.join(import.meta.dir, "..", "packages", "coding-agent", "src", "cli.ts");
@@ -776,6 +778,8 @@ export async function runBenchmark(options: RunOptions): Promise<BenchRun> {
 
 	const args = [CLI_ENTRY, "--cwd", cwd, "--mode", "json"];
 	if (options.model) args.push("--model", options.model);
+	if (options.thinking) args.push("--thinking", options.thinking);
+	if (options.configFiles) for (const cf of options.configFiles) args.push("--config", cf);
 	args.push(prompt);
 
 	const started = Bun.nanoseconds();
