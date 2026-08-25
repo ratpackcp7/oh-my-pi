@@ -678,15 +678,23 @@ async function spillLargeResultToArtifact(
 	// error, nor re-expose the full (possibly context-blowing) output. Mirror
 	// `enforceInlineByteCap`: always truncate past the threshold, and only
 	// attach the `artifact://` recovery link when the save actually succeeded.
-	const sourceIsFile = toolName === "read" && existingMeta?.source?.type === "path" && context?.agentKind === "main";
+	// A `read` whose source is durable is already its own recovery route: the file
+	// on disk, or an internal pointer (`agent://`, `memory://`, `skill://`) that
+	// takes the same line selectors. Copying either into an artifact duplicates
+	// bytes the session can already address — and for a pointer the parent
+	// ingress budget goes on to shape the result around that very pointer, so the
+	// artifact is written, paid for, and then never cited.
+	const sourceType = existingMeta?.source?.type;
+	const sourceIsDurable =
+		toolName === "read" && (sourceType === "path" || sourceType === "internal") && context?.agentKind === "main";
 	let artifactId: string | undefined;
-	if (!sourceIsFile) {
+	if (!sourceIsDurable) {
 		try {
 			artifactId = await sessionManager.saveArtifact(fullText, toolName);
 		} catch (error) {
 			logger.warn("Failed to spill large tool result to artifact", {
 				tool: toolName,
-			error: error instanceof Error ? error.message : String(error),
+				error: error instanceof Error ? error.message : String(error),
 			});
 		}
 	}

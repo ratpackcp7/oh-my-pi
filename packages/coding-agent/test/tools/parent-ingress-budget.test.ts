@@ -64,10 +64,11 @@ function makeContext(
 }
 
 /** A tool result carrying `n` distinct, individually identifiable lines. */
-function bulkText(n: number, tag = "line"): string {
-	return Array.from({ length: n }, (_, i) => `${tag}-${String(i + 1).padStart(5, "0")} ${"payload ".repeat(8)}`).join(
-		"\n",
-	);
+function bulkText(n: number, tag = "line", repeats = 8): string {
+	return Array.from(
+		{ length: n },
+		(_, i) => `${tag}-${String(i + 1).padStart(5, "0")} ${"payload ".repeat(repeats)}`,
+	).join("\n");
 }
 
 function toolResultEntry(id: string, toolName: string, text: string, prunedAt?: number): SessionEntry {
@@ -710,6 +711,9 @@ describe("parent ingress budget — agent:// delegated output", () => {
 		await fs.mkdir(artifactDir, { recursive: true });
 		fullReport = bulkText(500, "finding");
 		await Bun.write(path.join(artifactDir, "BigScout.md"), fullReport);
+		// Long lines, so the window the read returns clears the 50 KB generic spill
+		// threshold the way a real delegated report does.
+		await Bun.write(path.join(artifactDir, "HugeScout.md"), bulkText(600, "huge", 40));
 		resetRegisteredArtifactDirsForTests();
 		unregister = registerArtifactsDir(artifactDir);
 		sessionManager = new FakeSessionManager();
@@ -747,6 +751,25 @@ describe("parent ingress budget — agent:// delegated output", () => {
 		expect(sessionManager.saved.size).toBe(0);
 		expect(text).toContain("agent://BigScout:");
 		expect(result.details?.meta?.ingress?.shapedAs).toBe("pointer");
+	});
+
+	it("does not re-spill a pointer read that already exceeds the generic 50 KB threshold", async () => {
+		const result = await tool.execute(
+			"call-agent-huge",
+			{ path: "agent://HugeScout", i: "read" },
+			undefined,
+			undefined,
+			makeContext(sessionManager, "main"),
+		);
+		const text = modelText(result);
+
+		// The pointer is durable and the budget shapes the result around it, so a
+		// copy in session storage is bytes written, paid for, and never cited.
+		expect(sessionManager.saved.size).toBe(0);
+		expect(text).not.toContain("artifact://");
+		expect(result.details?.meta?.ingress?.shapedAs).toBe("pointer");
+		expect(text).toContain("agent://HugeScout");
+		expect(Buffer.byteLength(text, "utf-8")).toBeLessThanOrEqual(6 * 1024 + 1024);
 	});
 
 	it("returns the exact cited region when the parent pages the pointer", async () => {
