@@ -247,6 +247,29 @@ describe("parent ingress budget", () => {
 			expect(match).not.toBeNull();
 			expect(Number((match as RegExpExecArray)[1])).toBeGreaterThan(5000);
 		});
+
+		it("states no line count when the producing tool could not establish one", async () => {
+			// A file too large to scan to EOF: `stat` gives an exact byte size, but the
+			// line total is only a lower bound, so the tool reports bytes alone. A
+			// count assembled from the payload would understate the source instead.
+			const shaped = await applyParentIngressBudget(
+				{
+					content: [{ type: "text", text: bulkText(400, "huge") }],
+					details: {
+						meta: {
+							source: { type: "path", value: "/tmp/huge.log" },
+							sourceSize: { bytes: 900_000_000 },
+						},
+					},
+				},
+				"read",
+				makeContext(sessionManager, "main"),
+			);
+			const text = modelText(shaped);
+
+			expect(text).toContain(`source: ${(900_000_000).toLocaleString()} bytes`);
+			expect(text).not.toMatch(/\d+ lines/);
+		});
 	});
 
 	describe("F7 — failure diagnostics survive the bound", () => {
@@ -304,59 +327,83 @@ describe("parent ingress budget", () => {
 		});
 	});
 
+	/**
+	 * The subject is what a transcript actually holds. A session persists the
+	 * model-facing content, so an oversized result is on the branch as its SHAPED
+	 * body — bounded excerpt plus recovery notice — never as the raw payload the
+	 * tool produced. Both sides of every comparison below are therefore shaped
+	 * exactly as the wrapper ships them; a fixture holding raw text would test a
+	 * persistence model production does not have.
+	 */
 	describe("F3 — duplicate ingress is suppressed, but only while genuinely present", () => {
-		it("replaces a body the active context already holds with a compact reference", () => {
-			const full = bulkText(600, "dupe");
-			sessionManager.branch = [toolResultEntry("e1", "grep", full)];
-
-			const shaped = suppressDuplicateIngress(
-				{ content: [{ type: "text", text: full }] },
-				"grep",
+		/** A large file result, shaped as `wrapToolWithMetaNotice` would ship it. */
+		function shape(text: string): Promise<AgentToolResult> {
+			return applyParentIngressBudget(
+				{
+					content: [{ type: "text", text }],
+					details: { meta: { source: { type: "path", value: "/repo/big.txt" } } },
+				},
+				"read",
 				makeContext(sessionManager, "main"),
 			);
-			const text = modelText(shaped);
+		}
 
-			expect(text).not.toContain("dupe-00300");
+		it("replaces a body the active context already holds with a compact reference", async () => {
+			const first = await shape(bulkText(600, "dupe"));
+			sessionManager.branch = [toolResultEntry("e1", "read", modelText(first))];
+
+			const repeat = suppressDuplicateIngress(
+				await shape(bulkText(600, "dupe")),
+				"read",
+				makeContext(sessionManager, "main"),
+			);
+			const text = modelText(repeat);
+
+			// Not even the excerpt the first call already delivered.
+			expect(text).not.toContain("dupe-00010");
 			expect(text).toContain("already in this conversation");
 			expect(text).toContain("call-e1");
+			expect(repeat.details?.meta?.ingress?.shapedAs).toBe("duplicate");
 			expect(Buffer.byteLength(text, "utf-8")).toBeLessThan(1024);
 		});
 
-		it("lets changed content through instead of falsely deduplicating it", () => {
-			sessionManager.branch = [toolResultEntry("e1", "grep", bulkText(600, "dupe"))];
-			const changed = `${bulkText(600, "dupe")}\nnew-evidence-line`;
+		it("lets changed content through instead of falsely deduplicating it", async () => {
+			sessionManager.branch = [toolResultEntry("e1", "read", modelText(await shape(bulkText(600, "dupe"))))];
 
-			const shaped = suppressDuplicateIngress(
-				{ content: [{ type: "text", text: changed }] },
-				"grep",
-				makeContext(sessionManager, "main"),
+			// A line edited inside the excerpt: visibly different bytes.
+			const edited = bulkText(600, "dupe").replace("dupe-00005", "dupe-00005-EDITED");
+			const editedShaped = await shape(edited);
+			expect(modelText(suppressDuplicateIngress(editedShaped, "read", makeContext(sessionManager, "main")))).toBe(
+				modelText(editedShaped),
 			);
 
-			expect(modelText(shaped)).toBe(changed);
+			// A line appended past the excerpt: the shaped body still differs,
+			// because the notice states the true size of the source it came from.
+			const grown = `${bulkText(600, "dupe")}\nnew-evidence-line`;
+			const grownShaped = await shape(grown);
+			expect(modelText(suppressDuplicateIngress(grownShaped, "read", makeContext(sessionManager, "main")))).toBe(
+				modelText(grownShaped),
+			);
 		});
 
-		it("lets the body back in once compaction pruned the earlier copy", () => {
-			const full = bulkText(600, "dupe");
-			sessionManager.branch = [toolResultEntry("e1", "grep", full, Date.now())];
-
-			const shaped = suppressDuplicateIngress(
-				{ content: [{ type: "text", text: full }] },
-				"grep",
-				makeContext(sessionManager, "main"),
-			);
+		it("lets the body back in once pruning blanked the earlier copy", async () => {
+			const shaped = await shape(bulkText(600, "dupe"));
+			sessionManager.branch = [toolResultEntry("e1", "read", modelText(shaped), Date.now())];
 
 			// The prior result is no longer in context; suppressing would starve the model.
-			expect(modelText(shaped)).toBe(full);
+			expect(modelText(suppressDuplicateIngress(shaped, "read", makeContext(sessionManager, "main")))).toBe(
+				modelText(shaped),
+			);
 		});
 
-		it("lets the body back in once compaction summarized the earlier copy away", () => {
+		it("lets the body back in once compaction summarized the earlier copy away", async () => {
 			// Compaction does NOT set prunedAt: it moves the context window forward
 			// via firstKeptEntryId. Trusting prunedAt alone would tell the model to
 			// "scroll back" to a body that is no longer in its context, and throw
 			// away the fresh copy.
-			const full = bulkText(600, "dupe");
+			const shaped = await shape(bulkText(600, "dupe"));
 			sessionManager.branch = [
-				toolResultEntry("e1", "grep", full),
+				toolResultEntry("e1", "read", modelText(shaped)),
 				{
 					type: "compaction",
 					id: "c1",
@@ -366,22 +413,18 @@ describe("parent ingress budget", () => {
 					firstKeptEntryId: "e2",
 					tokensBefore: 90_000,
 				} as unknown as SessionEntry,
-				toolResultEntry("e2", "grep", "unrelated later result"),
+				toolResultEntry("e2", "read", "unrelated later result"),
 			];
 
-			const shaped = suppressDuplicateIngress(
-				{ content: [{ type: "text", text: full }] },
-				"grep",
-				makeContext(sessionManager, "main"),
+			expect(modelText(suppressDuplicateIngress(shaped, "read", makeContext(sessionManager, "main")))).toBe(
+				modelText(shaped),
 			);
-
-			expect(modelText(shaped)).toBe(full);
 		});
 
-		it("still suppresses a duplicate that lives after the compaction boundary", () => {
-			const full = bulkText(600, "dupe");
+		it("still suppresses a duplicate that lives after the compaction boundary", async () => {
+			const shaped = await shape(bulkText(600, "dupe"));
 			sessionManager.branch = [
-				toolResultEntry("e0", "grep", "pre-compaction noise"),
+				toolResultEntry("e0", "read", "pre-compaction noise"),
 				{
 					type: "compaction",
 					id: "c1",
@@ -391,30 +434,21 @@ describe("parent ingress budget", () => {
 					firstKeptEntryId: "e1",
 					tokensBefore: 90_000,
 				} as unknown as SessionEntry,
-				toolResultEntry("e1", "grep", full),
+				toolResultEntry("e1", "read", modelText(shaped)),
 			];
 
-			const shaped = suppressDuplicateIngress(
-				{ content: [{ type: "text", text: full }] },
-				"grep",
-				makeContext(sessionManager, "main"),
-			);
-
-			expect(modelText(shaped)).toContain("already in this conversation");
-			expect(modelText(shaped)).toContain("call-e1");
+			const text = modelText(suppressDuplicateIngress(shaped, "read", makeContext(sessionManager, "main")));
+			expect(text).toContain("already in this conversation");
+			expect(text).toContain("call-e1");
 		});
 
-		it("does not match an identical payload produced by a different tool", () => {
-			const full = bulkText(600, "dupe");
-			sessionManager.branch = [toolResultEntry("e1", "read", full)];
+		it("does not match an identical payload produced by a different tool", async () => {
+			const shaped = await shape(bulkText(600, "dupe"));
+			sessionManager.branch = [toolResultEntry("e1", "grep", modelText(shaped))];
 
-			const shaped = suppressDuplicateIngress(
-				{ content: [{ type: "text", text: full }] },
-				"grep",
-				makeContext(sessionManager, "main"),
+			expect(modelText(suppressDuplicateIngress(shaped, "read", makeContext(sessionManager, "main")))).toBe(
+				modelText(shaped),
 			);
-
-			expect(modelText(shaped)).toBe(full);
 		});
 
 		it("repeats small results rather than explaining them", () => {
@@ -609,6 +643,38 @@ describe("parent ingress budget — read tool", () => {
 		expect(Buffer.byteLength(text, "utf-8")).toBeLessThanOrEqual(6 * 1024 + 1024);
 		expect(text).toContain("Recover exact evidence with a range selector");
 		expect(sessionManager.saved.size).toBe(0);
+	});
+
+	it("F2 — states the true size of the source, not of the already-truncated payload", async () => {
+		const context = makeContext(sessionManager, "main");
+		const result = await tool.execute("call-scale", { path: bigFile, i: "read" }, undefined, undefined, context);
+		const text = modelText(result);
+		const onDisk = (await fs.stat(bigFile)).size;
+
+		// The read's own line window cut the payload to ~300 of the file's 900 lines
+		// before the budget ever saw it, so counting the payload understates the
+		// source three-fold — and tells the model it was shown nearly everything.
+		expect(text).toContain(`source: ${(900).toLocaleString()} lines, ${onDisk.toLocaleString()} bytes`);
+		expect(result.details?.meta?.truncation?.totalLines).toBe(900);
+		expect(result.details?.meta?.truncation?.totalBytes).toBe(onDisk);
+	});
+
+	it("F3 — a repeat of the same oversized read arrives as a compact reference", async () => {
+		const context = makeContext(sessionManager, "main");
+		const first = await tool.execute("call-dupe-1", { path: bigFile, i: "read" }, undefined, undefined, context);
+		// What the session persists is the model-facing content of the first call:
+		// its shaped excerpt, not the payload the read tool produced.
+		sessionManager.branch = [toolResultEntry("e1", "read", modelText(first))];
+
+		const second = await tool.execute("call-dupe-2", { path: bigFile, i: "read" }, undefined, undefined, context);
+		const text = modelText(second);
+
+		expect(text).toContain("already in this conversation");
+		expect(text).toContain("call-e1");
+		expect(second.details?.meta?.ingress?.shapedAs).toBe("duplicate");
+		// Well under the shaped excerpt the first call already delivered.
+		expect(Buffer.byteLength(text, "utf-8")).toBeLessThan(1024);
+		expect(text).not.toContain("src-00010");
 	});
 
 	it("F9 — leaves the same oversized whole-file read intact for a subagent", async () => {

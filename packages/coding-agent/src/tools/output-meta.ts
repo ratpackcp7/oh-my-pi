@@ -18,11 +18,18 @@ import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
 import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "../session/streaming-output";
 import { applyParentIngressBudget, suppressDuplicateIngress } from "./ingress-budget";
-import type { DiagnosticMeta, LimitsMeta, OutputMeta, SourceMeta, TruncationMeta } from "./output-meta-types";
+import type { OutputMeta, SourceSizeMeta, TruncationMeta } from "./output-meta-types";
 import { formatBytes, wrapBrackets } from "./render-utils";
 import { renderError } from "./tool-errors";
 
-export type { DiagnosticMeta, LimitsMeta, OutputMeta, SourceMeta, TruncationMeta } from "./output-meta-types";
+export type {
+	DiagnosticMeta,
+	LimitsMeta,
+	OutputMeta,
+	SourceMeta,
+	SourceSizeMeta,
+	TruncationMeta,
+} from "./output-meta-types";
 
 // =============================================================================
 // OutputMetaBuilder - Fluent API for building OutputMeta
@@ -305,6 +312,21 @@ export class OutputMetaBuilder {
 	/** Add internal URL source info (skill://, agent://, artifact://). */
 	sourceInternal(value: string): this {
 		this.#meta.source = { type: "internal", value };
+		return this;
+	}
+
+	/**
+	 * Record the true size of the whole source this payload came from. Only
+	 * fields the caller measured exactly are kept: downstream consumers (the
+	 * parent ingress budget's recovery notices) state no count rather than a
+	 * count derived from an already-truncated payload.
+	 */
+	sourceSize(size: { lines?: number; bytes?: number }): this {
+		const sourceSize: SourceSizeMeta = {};
+		if (size.lines !== undefined) sourceSize.lines = size.lines;
+		if (size.bytes !== undefined) sourceSize.bytes = size.bytes;
+		if (sourceSize.lines === undefined && sourceSize.bytes === undefined) return this;
+		this.#meta.sourceSize = sourceSize;
 		return this;
 	}
 
@@ -762,11 +784,11 @@ async function wrappedExecute(
 		// Spill large results to artifact, truncate to tail
 		result = await spillLargeResultToArtifact(result, this.name, context);
 
-		// Bound what a single result may inject into the top-level transcript.
-		// Dedupe first: a payload the active context already holds needs a
-		// reference, not a second shaped copy of the same bytes.
-		result = suppressDuplicateIngress(result, this.name, context);
+		// Bound what a single result may inject into the top-level transcript, then
+		// drop it entirely if the shaped bytes are already in the transcript. Shape
+		// first: the branch holds shaped results, so only shaped bytes can match.
 		result = await applyParentIngressBudget(result, this.name, context);
+		result = suppressDuplicateIngress(result, this.name, context);
 
 		// Append notices from meta. Ingress-shaped results already carry their own
 		// tailored recovery text; see OutputMeta.ingress.

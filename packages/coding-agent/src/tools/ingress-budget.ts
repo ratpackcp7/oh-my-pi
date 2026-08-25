@@ -23,6 +23,13 @@
  * - **No double accounting.** When the generic artifact spill already reduced a
  *   result and minted its artifact, that id is reused rather than saving the
  *   same bytes twice.
+ * - **Never a fabricated count.** Notices state the size of the real source,
+ *   taken from what the producing tool measured ({@link OutputMeta.sourceSize}
+ *   or its truncation totals), never from the already-reduced payload this
+ *   module receives. A count that cannot be established is omitted.
+ * - **Shape, then deduplicate.** A transcript holds shaped results, so
+ *   {@link suppressDuplicateIngress} runs after {@link applyParentIngressBudget}
+ *   and compares shaped bytes against shaped bytes.
  */
 import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -30,7 +37,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { getDefault, type Settings } from "../config/settings";
 import { getLatestCompactionEntry } from "../session/session-context";
 import { truncateHead, truncateMiddle, truncateTail } from "../session/streaming-output";
-import type { OutputMeta, SourceMeta, TruncationMeta } from "./output-meta-types";
+import type { OutputMeta, SourceMeta, SourceSizeMeta, TruncationMeta } from "./output-meta-types";
 
 /**
  * Share of the budget spent on the head when a bounded body keeps both ends.
@@ -46,6 +53,13 @@ const ERROR_HEAD_FRACTION = 0.35;
  * follow-up turn for evidence the model could have read once.
  */
 const MIN_BODY_BYTES = 512;
+
+/**
+ * Floor on duplicate suppression. The reference notice costs a few hundred
+ * bytes and buys the model an indirection ("scroll back for the body"), so a
+ * result smaller than this is strictly cheaper to repeat verbatim.
+ */
+const MIN_DUPLICATE_BYTES = 1024;
 
 /** Resolve the parent ingress budget in bytes. 0 (or negative) disables. */
 export function resolveParentIngressBudgetBytes(settings: Settings | undefined): number {
@@ -176,6 +190,37 @@ function nextUnshownLine(
 }
 
 /**
+ * Size of the whole source a payload was taken from, with any count that cannot
+ * be established left `undefined`.
+ *
+ * The payload is only what reached this module. The `read` tool's own line
+ * window and the 50 KB artifact spill both reduce a result before the budget
+ * ever sees it, so counting the payload understates the source — the 900-line,
+ * 67 KB test fixture measures 301 lines that way. A wrong count is worse than
+ * no count: it tells the model the evidence it was shown was nearly all of it.
+ *
+ * Order of trust: {@link OutputMeta.sourceSize}, which the producing tool
+ * measured against the real source and only sets per exactly-known field; then
+ * the totals the tool recorded for the result it truncated; and only when
+ * nothing upstream reduced the payload, the payload itself — which then IS the
+ * whole source.
+ */
+function sourceScale(text: string, meta: OutputMeta | undefined): SourceSizeMeta {
+	if (meta?.sourceSize) return meta.sourceSize;
+	const truncation = meta?.truncation;
+	if (truncation) return { lines: truncation.totalLines, bytes: truncation.totalBytes };
+	return { lines: countLines(text), bytes: Buffer.byteLength(text, "utf-8") };
+}
+
+/** `900 lines, 67,499 bytes` — dropping whichever counts are not known, or "". */
+function sizeClause(scale: SourceSizeMeta): string {
+	const parts: string[] = [];
+	if (scale.lines !== undefined) parts.push(`${scale.lines.toLocaleString()} lines`);
+	if (scale.bytes !== undefined) parts.push(`${scale.bytes.toLocaleString()} bytes`);
+	return parts.join(", ");
+}
+
+/**
  * Recovery instruction for evidence that stays where it already lives: a source
  * file, or a durable internal pointer. A concrete `:start-end` example is only
  * offered when {@link nextUnshownLine} can derive the resume line; otherwise we
@@ -184,30 +229,35 @@ function nextUnshownLine(
 function selectorRecoveryNotice(
 	kind: "file" | "pointer",
 	sourceValue: string,
-	totalLines: number,
+	scale: SourceSizeMeta,
 	body: string,
 	truncation: TruncationMeta | undefined,
 ): string {
 	const nextStart = nextUnshownLine(kind, body, truncation);
 	const identity =
 		kind === "file" ? "The file on disk remains the source of truth" : "The pointer is durable and can be paged";
-	const scale = totalLines > 0 ? ` (${totalLines.toLocaleString()} lines before reduction)` : "";
+	const size = sizeClause(scale);
+	const scaleText = size ? ` (source: ${size})` : "";
 	const recovery =
 		nextStart === undefined
 			? `[Recover exact evidence by re-reading \`${sourceValue}\` with a narrower selector, using the selector syntax that source supports. Request only the region you need.]`
 			: `[Recover exact evidence with a range selector, e.g. \`${sourceValue}:${nextStart}-${nextStart + 199}\`. Request only the ranges you need.]`;
-	return ["", `[Parent ingress budget: this result was reduced${scale}. ${identity}.]`, recovery].join("\n");
+	return ["", `[Parent ingress budget: this result was reduced${scaleText}. ${identity}.]`, recovery].join("\n");
 }
 
-/** Recovery instruction for generated output that had to be externalized. */
-function artifactRecoveryNotice(artifactId: string | undefined, totalLines: number, totalBytes: number): string {
-	const scale = `${totalLines.toLocaleString()} lines, ${totalBytes.toLocaleString()} bytes`;
+/**
+ * Recovery instruction for generated output that had to be externalized.
+ * `scale` describes what the artifact holds, not what the model was shown.
+ */
+function artifactRecoveryNotice(artifactId: string | undefined, scale: SourceSizeMeta): string {
+	const size = sizeClause(scale);
+	const reduced = `this result was reduced${size ? ` (${size})` : ""}`;
 	if (!artifactId) {
-		return `\n[Parent ingress budget: this result was reduced (${scale}). Externalizing the full output failed, so re-run the command with a narrower scope to see the elided region.]`;
+		return `\n[Parent ingress budget: ${reduced}. Externalizing the full output failed, so re-run the command with a narrower scope to see the elided region.]`;
 	}
 	return [
 		"",
-		`[Parent ingress budget: this result was reduced (${scale}). Full output: artifact://${artifactId}]`,
+		`[Parent ingress budget: ${reduced}. Full output: artifact://${artifactId}]`,
 		`[Read exact regions with a selector, e.g. \`artifact://${artifactId}:1-200\`.]`,
 	].join("\n");
 }
@@ -268,23 +318,30 @@ function structuredEnvelope(payload: unknown, artifactId: string | undefined, to
 /** Build the truncation meta describing a parent-ingress reduction. */
 function ingressTruncationMeta(
 	existing: TruncationMeta | undefined,
-	totalLines: number,
-	totalBytes: number,
+	scale: SourceSizeMeta,
+	payloadLines: number,
+	payloadBytes: number,
 	body: string,
 	budget: number,
 	artifactId: string | undefined,
 ): TruncationMeta {
 	const outputLines = countLines(body);
+	const outputBytes = Buffer.byteLength(body, "utf-8");
+	// Prefer the true source size: stamping the payload's own counts here would
+	// republish the understatement this module exists to avoid, and would make
+	// every elided-region figure below it wrong too.
+	const totalLines = scale.lines ?? payloadLines;
+	const totalBytes = scale.bytes ?? payloadBytes;
 	return {
 		direction: "middle",
 		truncatedBy: "middle",
 		totalLines,
 		totalBytes,
 		outputLines,
-		outputBytes: Buffer.byteLength(body, "utf-8"),
+		outputBytes,
 		maxBytes: budget,
 		elidedLines: Math.max(0, totalLines - outputLines),
-		elidedBytes: Math.max(0, totalBytes - Buffer.byteLength(body, "utf-8")),
+		elidedBytes: Math.max(0, totalBytes - outputBytes),
 		artifactId: artifactId ?? existing?.artifactId,
 		nextOffset: existing?.nextOffset,
 	};
@@ -338,44 +395,58 @@ export async function applyParentIngressBudget(
 	let body: string;
 	let shapedAs: NonNullable<OutputMeta["ingress"]>["shapedAs"];
 	let artifactId: string | undefined = existingMeta?.truncation?.artifactId;
+	// True size of the evidence, for every notice that states one.
+	const scale = sourceScale(fullText, existingMeta);
+	// What an artifact route actually holds: this payload when the budget mints
+	// the artifact below, or the pre-reduction original when the generic spill
+	// already minted one and recorded its totals.
+	const artifactScale: SourceSizeMeta = artifactId === undefined ? { lines: totalLines, bytes: totalBytes } : scale;
 
 	const structured = parseJsonPayload(fullText);
 	if (structured !== undefined) {
 		// Structured payloads must stay parseable. Externalize and emit a valid
 		// compact envelope rather than slicing bytes out of a JSON document.
 		artifactId ??= await externalize(fullText, toolName, context);
-		body = structuredEnvelope(structured, artifactId, totalBytes);
+		body = structuredEnvelope(structured, artifactId, artifactScale.bytes ?? totalBytes);
 		shapedAs = "structured";
 	} else if (result.isError === true) {
 		// Failures keep both ends: the invocation context at the head and the
 		// exception, exit status, and stack at the tail.
 		const bounded = boundBody(fullText, budget, "middle", ERROR_HEAD_FRACTION);
 		artifactId ??= await externalize(fullText, toolName, context);
-		body = bounded + artifactRecoveryNotice(artifactId, totalLines, totalBytes);
+		body = bounded + artifactRecoveryNotice(artifactId, artifactScale);
 		shapedAs = "artifact";
 	} else if (source?.type === "path") {
 		// The file is its own durable evidence. Copying it into an artifact would
 		// duplicate the repository into session storage for no recovery benefit.
 		// Head-only so the recovery selector names the true next unread line.
 		const bounded = boundBody(fullText, budget, "head");
-		body = bounded + selectorRecoveryNotice("file", source.value, totalLines, bounded, existingMeta?.truncation);
+		body = bounded + selectorRecoveryNotice("file", source.value, scale, bounded, existingMeta?.truncation);
 		shapedAs = "file";
 	} else if (source?.type === "internal") {
 		// `agent://`, `memory://`, `skill://` … are already durable pointers that
 		// accept the same line selectors as a file.
 		const bounded = boundBody(fullText, budget, "head");
-		body = bounded + selectorRecoveryNotice("pointer", source.value, totalLines, bounded, existingMeta?.truncation);
+		body = bounded + selectorRecoveryNotice("pointer", source.value, scale, bounded, existingMeta?.truncation);
 		shapedAs = "pointer";
 	} else {
 		// Generated output (bash, grep aggregations, MCP, extension tools): the
 		// bytes exist nowhere else, so they must be externalized before reduction.
 		const bounded = boundBody(fullText, budget, "middle");
 		artifactId ??= await externalize(fullText, toolName, context);
-		body = bounded + artifactRecoveryNotice(artifactId, totalLines, totalBytes);
+		body = bounded + artifactRecoveryNotice(artifactId, artifactScale);
 		shapedAs = "artifact";
 	}
 
-	const truncation = ingressTruncationMeta(existingMeta?.truncation, totalLines, totalBytes, body, budget, artifactId);
+	const truncation = ingressTruncationMeta(
+		existingMeta?.truncation,
+		scale,
+		totalLines,
+		totalBytes,
+		body,
+		budget,
+		artifactId,
+	);
 	const meta: OutputMeta = { ...(existingMeta ?? {}), truncation, ingress: { shapedAs } };
 	return {
 		...result,
@@ -385,7 +456,16 @@ export async function applyParentIngressBudget(
 }
 
 /**
- * Suppress a large payload the active parent context already holds verbatim.
+ * Suppress a payload the active parent context already holds verbatim.
+ *
+ * Runs AFTER {@link applyParentIngressBudget} and compares the SHAPED bytes,
+ * because shaped bytes are what a transcript holds: the session persists the
+ * model-facing content, so an oversized read is on the branch as its bounded
+ * excerpt plus recovery notice, never as the raw payload the tool produced.
+ * Comparing raw text against the branch could therefore only ever match
+ * results the budget left alone — exactly the class this does not exist for.
+ * Shaping is deterministic for a given request, so repeating the same read
+ * yields byte-identical shaped output and equality holds.
  *
  * "Already holds" is decided against the live branch, not a side ledger, and a
  * prior `toolResult` counts only when it is genuinely still being sent to the
@@ -400,12 +480,12 @@ export async function applyParentIngressBudget(
  * no longer exists in its context while discarding the fresh copy, so the scan
  * starts at the latest compaction boundary rather than at the root.
  *
- * Identity is full-text equality of the model-facing text, so any source change
- * — a different revision, a different range, one edited line — produces a
- * different payload and is never falsely deduplicated.
- *
- * Runs before {@link applyParentIngressBudget} and only for payloads that would
- * otherwise be shaped: a small result is cheaper to repeat than to explain.
+ * Identity is full-text equality of the model-facing text, so any change the
+ * model would have seen — a different revision, a different range, an edited
+ * line, a different source size in the notice — produces a different payload
+ * and is never falsely deduplicated. A change confined to a region that was
+ * elided either way is not in context to lose: the recovery selector still
+ * pages the live source.
  */
 export function suppressDuplicateIngress(
 	result: AgentToolResult,
@@ -415,13 +495,14 @@ export function suppressDuplicateIngress(
 	if (context?.agentKind !== "main") return result;
 	const sessionManager = context?.sessionManager;
 	if (!sessionManager) return result;
-	const budget = resolveParentIngressBudgetBytes(context?.settings);
-	if (budget <= 0) return result;
+	// One switch governs the whole mechanism.
+	if (resolveParentIngressBudgetBytes(context?.settings) <= 0) return result;
 
 	const fullText = collectText(result.content);
 	if (fullText === undefined) return result;
 	const totalBytes = Buffer.byteLength(fullText, "utf-8");
-	if (totalBytes <= budget) return result;
+	// A small result is cheaper to repeat than to explain.
+	if (totalBytes <= MIN_DUPLICATE_BYTES) return result;
 
 	const branch = sessionManager.getBranch();
 	// Everything at or before the boundary was replaced by a summary.
@@ -445,15 +526,13 @@ export function suppressDuplicateIngress(
 		break;
 	}
 	if (priorToolCallId === undefined) return result;
-
 	const existingMeta: OutputMeta | undefined = result.details?.meta;
 	const notice = duplicateIngressNotice(
 		toolName,
 		priorToolCallId,
 		existingMeta?.source,
 		existingMeta?.truncation?.artifactId,
-		countLines(fullText),
-		totalBytes,
+		sourceScale(fullText, existingMeta),
 	);
 	const meta: OutputMeta = { ...(existingMeta ?? {}), ingress: { shapedAs: "duplicate" } };
 	return {
@@ -473,11 +552,11 @@ function duplicateIngressNotice(
 	priorToolCallId: string,
 	source: SourceMeta | undefined,
 	artifactId: string | undefined,
-	totalLines: number,
-	totalBytes: number,
+	scale: SourceSizeMeta,
 ): string {
+	const size = sizeClause(scale);
 	return [
 		`[Parent ingress budget: identical \`${toolName}\` output is already in this conversation (tool call ${priorToolCallId}); it is not repeated here.]`,
-		`[Unchanged content: ${totalLines.toLocaleString()} lines, ${totalBytes.toLocaleString()} bytes. Scroll back for the body, or re-read ${recoveryHintFor(source, artifactId)} to page a specific region.]`,
+		`[Unchanged content${size ? `: ${size}` : ""}. Scroll back for the body, or re-read ${recoveryHintFor(source, artifactId)} to page a specific region.]`,
 	].join("\n");
 }
