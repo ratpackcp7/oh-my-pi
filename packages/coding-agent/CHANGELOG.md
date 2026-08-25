@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added a parent-context ingress budget (`tools.parentIngressBudget`, default 6 KB, `0` disables): a single tool result can no longer inject an arbitrarily large body into the long-lived top-level session. Oversized results are reduced to a bounded representation plus an exact recovery route — a `path:start-end` selector for files, the same selector on the durable URL for `agent://`-style pointers, a valid compact JSON envelope plus `artifact://` for structured payloads, and head+tail diagnostics for failures. Subagent contexts are deliberately unaffected so worker discovery is not starved.
+- Added suppression of duplicate parent ingress: when a byte-identical tool payload is already present and un-pruned in the active conversation, the repeat is replaced by a compact reference instead of a second copy. Content that changed, or whose earlier copy compaction already pruned, is never falsely deduplicated.
+
 - Added dynamic worker routing that protects the parent resource pool (`provider` + normalized `baseUrl` + account key; env/fallback credentials collapse to one pool; a Claude-family model via Cursor is a Cursor pool), routes children by `intent` (`default`|`cheap`|`normal`|`strong`|`vision`|`large-context`|`same-pool-ok`), and picks workers from the available registry by hard-filter order, scored selection (usage/preference/sibling diversity/cost/reasoning/rank with bounded 5-point tie-break), sticky session policy (`task.routing.*`), and bounded automatic reroute on structured-output contract failure (e.g. `scout` `schema_violation: (root): expected object, received string`; `task.routing.maxContractReroutes` default `1`). Precedence: per-spawn pin → `task.agentModelOverrides` → per-spawn `routing` → sticky session policy → dynamic router → auth/retry fallback. New observability: pool label, routing intent/reason, anti-affinity/fallback/usage flags, bypass reason, and reroute history; verbose traces go to logs, not the roster.
 - Worker-routing candidates are restricted to OMP's curated model chains (`priority.json` `slow`/`designer`/`smol`) plus concrete `modelRoles` / `task.agentModelOverrides` selectors, so an authenticated but unsuitable model is never routed to an agentic child.
 
@@ -15,6 +18,9 @@
 - The context status-line segment now reports concrete token counts (`5K/272K`) rather than a percentage, so the footer always shows how much context is actually consumed.
 
 ### Fixed
+
+- Fixed reads of `agent://` delegated output being unbounded: the `task` result preview was bounded but the parent could then read the full pointer body back into context, so pointer indirection deferred ingress instead of bounding it.
+- Fixed a large `read` of a real file being copied into session storage as an artifact. The file on disk is already the durable evidence and stays readable at any range, so the copy duplicated repository content for no recovery benefit.
 
 - Subscription-backed status-line spend now renders as `sub $8.97` (or the subscription icon plus `$8.97`) instead of the ambiguous `S8.97` shorthand.
 - Scratch directories such as `~/tmp` no longer inherit and display Git branch/dirty state from a repository rooted above the scratch directory.
