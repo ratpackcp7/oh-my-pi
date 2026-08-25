@@ -64,6 +64,11 @@ export class ToolResultBuilder<TDetails extends DetailsWithMeta> {
 		return this;
 	}
 
+	sourceSize(size: { lines?: number; bytes?: number }): this {
+		this.#meta.sourceSize(size);
+		return this;
+	}
+
 	diagnostics(summary: string, messages: string[]): this {
 		this.#meta.diagnostics(summary, messages);
 		return this;

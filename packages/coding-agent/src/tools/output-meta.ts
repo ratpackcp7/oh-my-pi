@@ -17,70 +17,19 @@ import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
 import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "../session/streaming-output";
+import { applyParentIngressBudget, suppressDuplicateIngress } from "./ingress-budget";
+import type { OutputMeta, SourceSizeMeta, TruncationMeta } from "./output-meta-types";
 import { formatBytes, wrapBrackets } from "./render-utils";
 import { renderError } from "./tool-errors";
 
-/**
- * Truncation metadata for the output notice.
- */
-export interface TruncationMeta {
-	direction: "head" | "tail" | "middle";
-	truncatedBy: "lines" | "bytes" | "middle";
-	totalLines: number;
-	totalBytes: number;
-	outputLines: number;
-	outputBytes: number;
-	maxBytes?: number;
-	/** Line range shown (1-indexed, inclusive). Omitted for middle elision. */
-	shownRange?: { start: number; end: number };
-	/** Head/tail line ranges shown when direction === "middle". */
-	headRange?: { start: number; end: number };
-	tailRange?: { start: number; end: number };
-	/** Bytes elided from the middle. */
-	elidedBytes?: number;
-	/** Lines elided from the middle. */
-	elidedLines?: number;
-	/** Artifact ID if full output was saved */
-	artifactId?: string;
-	/** Next offset for pagination (head truncation only) */
-	nextOffset?: number;
-}
-
-/**
- * Source resolution info for the output.
- */
-export type SourceMeta =
-	| { type: "path"; value: string }
-	| { type: "url"; value: string }
-	| { type: "internal"; value: string };
-
-/**
- * LSP diagnostic info (for edit/write tools).
- */
-export interface DiagnosticMeta {
-	summary: string;
-	messages: string[];
-}
-
-/**
- * Limit-specific notices.
- */
-export interface LimitsMeta {
-	matchLimit?: { reached: number; suggestion: number };
-	resultLimit?: { reached: number; suggestion: number };
-	headLimit?: { reached: number; suggestion: number };
-	columnTruncated?: { maxColumn: number };
-}
-
-/**
- * Structured metadata for tool outputs.
- */
-export interface OutputMeta {
-	truncation?: TruncationMeta;
-	source?: SourceMeta;
-	diagnostics?: DiagnosticMeta;
-	limits?: LimitsMeta;
-}
+export type {
+	DiagnosticMeta,
+	LimitsMeta,
+	OutputMeta,
+	SourceMeta,
+	SourceSizeMeta,
+	TruncationMeta,
+} from "./output-meta-types";
 
 // =============================================================================
 // OutputMetaBuilder - Fluent API for building OutputMeta
@@ -363,6 +312,21 @@ export class OutputMetaBuilder {
 	/** Add internal URL source info (skill://, agent://, artifact://). */
 	sourceInternal(value: string): this {
 		this.#meta.source = { type: "internal", value };
+		return this;
+	}
+
+	/**
+	 * Record the true size of the whole source this payload came from. Only
+	 * fields the caller measured exactly are kept: downstream consumers (the
+	 * parent ingress budget's recovery notices) state no count rather than a
+	 * count derived from an already-truncated payload.
+	 */
+	sourceSize(size: { lines?: number; bytes?: number }): this {
+		const sourceSize: SourceSizeMeta = {};
+		if (size.lines !== undefined) sourceSize.lines = size.lines;
+		if (size.bytes !== undefined) sourceSize.bytes = size.bytes;
+		if (sourceSize.lines === undefined && sourceSize.bytes === undefined) return this;
+		this.#meta.sourceSize = sourceSize;
 		return this;
 	}
 
@@ -714,14 +678,25 @@ async function spillLargeResultToArtifact(
 	// error, nor re-expose the full (possibly context-blowing) output. Mirror
 	// `enforceInlineByteCap`: always truncate past the threshold, and only
 	// attach the `artifact://` recovery link when the save actually succeeded.
+	// A `read` whose source is durable is already its own recovery route: the file
+	// on disk, or an internal pointer (`agent://`, `memory://`, `skill://`) that
+	// takes the same line selectors. Copying either into an artifact duplicates
+	// bytes the session can already address — and for a pointer the parent
+	// ingress budget goes on to shape the result around that very pointer, so the
+	// artifact is written, paid for, and then never cited.
+	const sourceType = existingMeta?.source?.type;
+	const sourceIsDurable =
+		toolName === "read" && (sourceType === "path" || sourceType === "internal") && context?.agentKind === "main";
 	let artifactId: string | undefined;
-	try {
-		artifactId = await sessionManager.saveArtifact(fullText, toolName);
-	} catch (error) {
-		logger.warn("Failed to spill large tool result to artifact", {
-			tool: toolName,
-			error: error instanceof Error ? error.message : String(error),
-		});
+	if (!sourceIsDurable) {
+		try {
+			artifactId = await sessionManager.saveArtifact(fullText, toolName);
+		} catch (error) {
+			logger.warn("Failed to spill large tool result to artifact", {
+				tool: toolName,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	// Truncate: middle elision when a head budget is configured, otherwise tail-only.
@@ -817,9 +792,16 @@ async function wrappedExecute(
 		// Spill large results to artifact, truncate to tail
 		result = await spillLargeResultToArtifact(result, this.name, context);
 
-		// Append notices from meta
+		// Bound what a single result may inject into the top-level transcript, then
+		// drop it entirely if the shaped bytes are already in the transcript. Shape
+		// first: the branch holds shaped results, so only shaped bytes can match.
+		result = await applyParentIngressBudget(result, this.name, context);
+		result = suppressDuplicateIngress(result, this.name, context);
+
+		// Append notices from meta. Ingress-shaped results already carry their own
+		// tailored recovery text; see OutputMeta.ingress.
 		const meta: OutputMeta | undefined = result.details?.meta;
-		if (meta) {
+		if (meta && !meta.ingress) {
 			return {
 				...result,
 				content: appendOutputNotice(result.content, meta),

@@ -1866,6 +1866,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (sourcePath) {
 			resultBuilder.sourcePath(sourcePath);
 		}
+		// What the file actually is, not what this window returned. `details.fileSize`
+		// comes from `stat`; `details.totalLines` is set only when the scan reached
+		// EOF, so a window that stopped early reports bytes and no line count rather
+		// than a lower bound that reads as a total.
+		resultBuilder.sourceSize({ lines: details.totalLines, bytes: details.fileSize });
 		if (truncationInfo) {
 			resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
 		}
@@ -2138,7 +2143,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const resultBuilder = toolResult<ReadToolDetails>(details)
 			.text(outputText)
 			.sourcePath(artifact.path)
-			.sourceInternal(url.href);
+			.sourceInternal(url.href)
+			// The artifact's own size, not this window's: line count only when the
+			// scan reached EOF and the total is exact.
+			.sourceSize({ lines: reachedEof ? totalFileLines : undefined, bytes: artifact.size });
 		if (truncationInfo) resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
 		return resultBuilder.done();
 	}

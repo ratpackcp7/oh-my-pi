@@ -344,6 +344,9 @@ export function buildInMemoryTextResult(
 	if (options.sourceInternal) {
 		resultBuilder.sourceInternal(options.sourceInternal);
 	}
+	// The whole source is in memory here, so both totals are exact whatever this
+	// window returns — the ingress budget must never infer them from the payload.
+	resultBuilder.sourceSize({ lines: totalLines, bytes: Buffer.byteLength(text, "utf-8") });
 
 	if (requestedStart >= allLines.length) {
 		const suggestion =
@@ -528,6 +531,7 @@ export function buildInMemoryMultiRangeResult(
 	if (options.sourcePath) resultBuilder.sourcePath(options.sourcePath);
 	if (options.sourceUrl) resultBuilder.sourceUrl(options.sourceUrl);
 	if (options.sourceInternal) resultBuilder.sourceInternal(options.sourceInternal);
+	resultBuilder.sourceSize({ lines: totalLines, bytes: Buffer.byteLength(text, "utf-8") });
 
 	const outOfBounds: LineRange[] = [];
 	const visibleSpans: Array<{ startLine: number; endLine: number }> = [];

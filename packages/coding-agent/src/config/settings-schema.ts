@@ -847,6 +847,26 @@ export const SETTINGS_SCHEMA = {
 				"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix.",
 		},
 	},
+	"tools.parentIngressBudget": {
+		type: "number",
+		default: 6,
+		ui: {
+			tab: "tools",
+			group: "Output Limits",
+			label: "Parent Ingress Budget (KB)",
+			description:
+				"Cap on a single tool result entering the top-level session's context. Larger results are reduced to a bounded representation plus an exact recovery pointer/selector. Subagent contexts are unaffected. 0 disables.",
+			options: [
+				{ value: "0", label: "Off", description: "No parent-specific bound" },
+				{ value: "2", label: "2 KB", description: "~500 tokens" },
+				{ value: "4", label: "4 KB", description: "~1K tokens" },
+				{ value: "6", label: "6 KB", description: "Default; ~1.5K tokens" },
+				{ value: "8", label: "8 KB", description: "~2K tokens" },
+				{ value: "12", label: "12 KB", description: "~3K tokens" },
+				{ value: "20", label: "20 KB", description: "~5K tokens" },
+			],
+		},
+	},
 	"tools.artifactSpillThreshold": {
 		type: "number",
 		default: 50,
