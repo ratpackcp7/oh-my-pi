@@ -1689,6 +1689,7 @@ export class SessionTools {
 			},
 			settings: this.#host.settings,
 			localProtocolOptions: this.#host.localProtocolOptions(),
+			agentKind: this.#host.agentKind(),
 		});
 
 		const extensionRunner = this.#host.extensionRunner();

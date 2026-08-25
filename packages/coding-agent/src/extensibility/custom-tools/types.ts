@@ -103,6 +103,13 @@ export interface CustomToolContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Whether to auto-approve all destructive tool operations (--auto-approve CLI flag) */
 	autoApprove?: boolean;
+	/**
+	 * Whether the calling session is the long-lived top-level session (`"main"`)
+	 * or an ephemeral subagent (`"sub"`). Read by the parent ingress budget,
+	 * which bounds what a single tool result may inject into the top-level
+	 * transcript and deliberately leaves worker contexts unbounded.
+	 */
+	agentKind?: "main" | "sub";
 }
 
 /** Session event passed to onSession callback */
