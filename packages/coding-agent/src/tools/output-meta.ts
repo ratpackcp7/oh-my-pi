@@ -17,70 +17,12 @@ import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
 import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "../session/streaming-output";
+import { applyParentIngressBudget, suppressDuplicateIngress } from "./ingress-budget";
+import type { DiagnosticMeta, LimitsMeta, OutputMeta, SourceMeta, TruncationMeta } from "./output-meta-types";
 import { formatBytes, wrapBrackets } from "./render-utils";
 import { renderError } from "./tool-errors";
 
-/**
- * Truncation metadata for the output notice.
- */
-export interface TruncationMeta {
-	direction: "head" | "tail" | "middle";
-	truncatedBy: "lines" | "bytes" | "middle";
-	totalLines: number;
-	totalBytes: number;
-	outputLines: number;
-	outputBytes: number;
-	maxBytes?: number;
-	/** Line range shown (1-indexed, inclusive). Omitted for middle elision. */
-	shownRange?: { start: number; end: number };
-	/** Head/tail line ranges shown when direction === "middle". */
-	headRange?: { start: number; end: number };
-	tailRange?: { start: number; end: number };
-	/** Bytes elided from the middle. */
-	elidedBytes?: number;
-	/** Lines elided from the middle. */
-	elidedLines?: number;
-	/** Artifact ID if full output was saved */
-	artifactId?: string;
-	/** Next offset for pagination (head truncation only) */
-	nextOffset?: number;
-}
-
-/**
- * Source resolution info for the output.
- */
-export type SourceMeta =
-	| { type: "path"; value: string }
-	| { type: "url"; value: string }
-	| { type: "internal"; value: string };
-
-/**
- * LSP diagnostic info (for edit/write tools).
- */
-export interface DiagnosticMeta {
-	summary: string;
-	messages: string[];
-}
-
-/**
- * Limit-specific notices.
- */
-export interface LimitsMeta {
-	matchLimit?: { reached: number; suggestion: number };
-	resultLimit?: { reached: number; suggestion: number };
-	headLimit?: { reached: number; suggestion: number };
-	columnTruncated?: { maxColumn: number };
-}
-
-/**
- * Structured metadata for tool outputs.
- */
-export interface OutputMeta {
-	truncation?: TruncationMeta;
-	source?: SourceMeta;
-	diagnostics?: DiagnosticMeta;
-	limits?: LimitsMeta;
-}
+export type { DiagnosticMeta, LimitsMeta, OutputMeta, SourceMeta, TruncationMeta } from "./output-meta-types";
 
 // =============================================================================
 // OutputMetaBuilder - Fluent API for building OutputMeta
@@ -714,14 +656,17 @@ async function spillLargeResultToArtifact(
 	// error, nor re-expose the full (possibly context-blowing) output. Mirror
 	// `enforceInlineByteCap`: always truncate past the threshold, and only
 	// attach the `artifact://` recovery link when the save actually succeeded.
+	const sourceIsFile = toolName === "read" && existingMeta?.source?.type === "path" && context?.agentKind === "main";
 	let artifactId: string | undefined;
-	try {
-		artifactId = await sessionManager.saveArtifact(fullText, toolName);
-	} catch (error) {
-		logger.warn("Failed to spill large tool result to artifact", {
-			tool: toolName,
+	if (!sourceIsFile) {
+		try {
+			artifactId = await sessionManager.saveArtifact(fullText, toolName);
+		} catch (error) {
+			logger.warn("Failed to spill large tool result to artifact", {
+				tool: toolName,
 			error: error instanceof Error ? error.message : String(error),
-		});
+			});
+		}
 	}
 
 	// Truncate: middle elision when a head budget is configured, otherwise tail-only.
@@ -817,9 +762,16 @@ async function wrappedExecute(
 		// Spill large results to artifact, truncate to tail
 		result = await spillLargeResultToArtifact(result, this.name, context);
 
-		// Append notices from meta
+		// Bound what a single result may inject into the top-level transcript.
+		// Dedupe first: a payload the active context already holds needs a
+		// reference, not a second shaped copy of the same bytes.
+		result = suppressDuplicateIngress(result, this.name, context);
+		result = await applyParentIngressBudget(result, this.name, context);
+
+		// Append notices from meta. Ingress-shaped results already carry their own
+		// tailored recovery text; see OutputMeta.ingress.
 		const meta: OutputMeta | undefined = result.details?.meta;
-		if (meta) {
+		if (meta && !meta.ingress) {
 			return {
 				...result,
 				content: appendOutputNotice(result.content, meta),
