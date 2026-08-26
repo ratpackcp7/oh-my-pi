@@ -96,8 +96,6 @@ const TURN_TRACE_CAP = 40;
 const TURN_TRACE_CAP_SUCCESS = 5;
 /** Cap on a single rendered trace line. */
 const TRACE_LINE_MAX = 120;
-/** Default `vibe_wait` window when no timeout was given (ms). */
-const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 /** Deadman ceiling for vibe_wait: no model-facing return before this unless worker settles or steering fires. 0 sentinel means "use deadman". */
 export const VIBE_WAIT_DEADMAN_MS = 25 * 60 * 1000;
 /** Response text cap inside a delivered turn result; full output stays at agent://<id>. */
@@ -2146,6 +2144,7 @@ export class VibeSessionRegistry {
 					status,
 					duration: formatDuration(result.durationMs),
 					requests: result.requests,
+					toolCount: turn.toolCount,
 					model: result.resolvedModel ?? record.resolvedModel ?? "",
 					trace: effectiveTraceLines,
 					traceOverflow: traceOverflow > 0 ? traceOverflow : undefined,
