@@ -309,7 +309,7 @@ describe("vibe wait envelope and deadman", () => {
 		const settings = Settings.isolated({});
 		const envelopeSession = makeParentSessionForEnvelope(settings, manager);
 		// Build huge output (>6000) and many tool calls (>40)
-		const hugeOutput = Array.from({ length: 800 }, (_, i) => `line ${i} ` + "x".repeat(20)).join("\n"); // ~ ~ > 15k
+		const hugeOutput = Array.from({ length: 800 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n"); // ~ ~ > 15k
 		const largeTraceCount = 50;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options: any) => {
 			for (let i = 0; i < largeTraceCount; i++) {
@@ -372,7 +372,7 @@ describe("vibe wait envelope and deadman", () => {
 	it("compact envelope, async: same large fixture via async self-delivery is equally capped with pointer", async () => {
 		const settings = Settings.isolated({});
 		const envelopeSession = makeParentSessionForEnvelope(settings, manager);
-		const hugeOutput = Array.from({ length: 800 }, (_, i) => `async line ${i} ` + "y".repeat(20)).join("\n");
+		const hugeOutput = Array.from({ length: 800 }, (_, i) => `async line ${i} ${"y".repeat(20)}`).join("\n");
 		const largeTraceCount = 50;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options: any) => {
 			for (let i = 0; i < largeTraceCount; i++) {
