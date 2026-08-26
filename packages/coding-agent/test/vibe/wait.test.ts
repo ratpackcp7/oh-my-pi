@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "../../src/async/job-manager";
-import type { ToolSession } from "../../src/tools";
-import { VibeWaitTool } from "../../src/tools/vibe";
-import { VibeSessionRegistry } from "../../src/vibe/runtime";
 import { Settings } from "../../src/config/settings";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import * as executorModule from "../../src/task/executor";
 import type { SingleResult } from "../../src/task/types";
+import type { ToolSession } from "../../src/tools";
+import { VibeWaitTool } from "../../src/tools/vibe";
+import { VibeSessionRegistry } from "../../src/vibe/runtime";
 
 const OWNER = "test-owner";
 const WORKER = "test-worker";
@@ -200,7 +200,10 @@ describe("vibe wait envelope and deadman", () => {
 		// Not yet timed out — create a check that pending hasn't resolved.
 		let resolved = false;
 		let result: Awaited<ReturnType<VibeWaitTool["execute"]>> | undefined;
-		void pendingTool.then(r => { resolved = true; result = r; });
+		void pendingTool.then(r => {
+			resolved = true;
+			result = r;
+		});
 		await Promise.resolve();
 		// Give microtasks a chance; should still be pending
 		expect(resolved).toBe(false);
@@ -308,7 +311,6 @@ describe("vibe wait envelope and deadman", () => {
 		// Build huge output (>6000) and many tool calls (>40)
 		const hugeOutput = Array.from({ length: 800 }, (_, i) => `line ${i} ` + "x".repeat(20)).join("\n"); // ~ ~ > 15k
 		const largeTraceCount = 50;
-		// @ts-ignore mock typing - runtime uses executor options with onProgress
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options: any) => {
 			for (let i = 0; i < largeTraceCount; i++) {
 				options.onProgress({
@@ -372,7 +374,6 @@ describe("vibe wait envelope and deadman", () => {
 		const envelopeSession = makeParentSessionForEnvelope(settings, manager);
 		const hugeOutput = Array.from({ length: 800 }, (_, i) => `async line ${i} ` + "y".repeat(20)).join("\n");
 		const largeTraceCount = 50;
-		// @ts-ignore mock typing
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options: any) => {
 			for (let i = 0; i < largeTraceCount; i++) {
 				options.onProgress({

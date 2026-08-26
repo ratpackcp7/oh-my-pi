@@ -244,7 +244,9 @@ export class VibeWaitTool implements AgentTool<typeof vibeWaitSchema, VibeToolDe
 		if (outcome.timedOut) {
 			const isDeadman = params.timeout === undefined || params.timeout === 0;
 			if (isDeadman) {
-				lines.push("worker may be stuck (no settlement after 25m) — re-issue vibe_wait to keep waiting or vibe_kill to terminate.");
+				lines.push(
+					"worker may be stuck (no settlement after 25m) — re-issue vibe_wait to keep waiting or vibe_kill to terminate.",
+				);
 			} else {
 				lines.push("Wait window elapsed before any turn settled — re-issue vibe_wait to keep waiting.");
 			}

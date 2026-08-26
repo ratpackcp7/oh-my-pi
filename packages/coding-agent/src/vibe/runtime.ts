@@ -562,7 +562,11 @@ export class VibeSessionRegistry {
 		jobId?: string;
 	}): void {
 		const now = Date.now();
-		const scope: VibeOwnerScope = { ownerId: record.ownerId, parentSessionId: "test-parent-session", parentSessionFile: null };
+		const scope: VibeOwnerScope = {
+			ownerId: record.ownerId,
+			parentSessionId: "test-parent-session",
+			parentSessionFile: null,
+		};
 		this.#records.set(scopeKey(scope, record.id), {
 			id: record.id,
 			cli: record.cli ?? "fast",
