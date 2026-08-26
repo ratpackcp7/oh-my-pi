@@ -87,7 +87,7 @@ const vibeSendSchema = type({
 
 const vibeWaitSchema = type({
 	"sessions?": type("string[]").describe("session ids to watch; omit to watch every session with a turn in flight"),
-	"timeout?": type("number > 0").describe("max seconds to wait (default 30)"),
+	"timeout?": type("number >= 0").describe("max seconds to wait (default 25m deadman); 0 means use deadman ceiling"),
 });
 
 const vibeKillSchema = type({
@@ -242,7 +242,14 @@ export class VibeWaitTool implements AgentTool<typeof vibeWaitSchema, VibeToolDe
 			lines.push(`Still running: ${outcome.stillRunning.map(id => `\`${id}\``).join(", ")}.`);
 		}
 		if (outcome.timedOut) {
-			lines.push("Wait window elapsed before any turn settled — re-issue vibe_wait to keep waiting.");
+			const isDeadman = params.timeout === undefined || params.timeout === 0;
+			if (isDeadman) {
+				lines.push(
+					"worker may be stuck (no settlement after 25m) — re-issue vibe_wait to keep waiting or vibe_kill to terminate.",
+				);
+			} else {
+				lines.push("Wait window elapsed before any turn settled — re-issue vibe_wait to keep waiting.");
+			}
 		}
 		const result = textResult(lines.join("\n").trimEnd(), details);
 		// A pure "still waiting" frame is noise once a newer wait exists.

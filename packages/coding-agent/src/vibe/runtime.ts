@@ -92,12 +92,16 @@ interface VibeTraceEntry {
 
 /** Cap on trace entries retained per turn (the run monitor keeps 5; we widen the window). */
 const TURN_TRACE_CAP = 40;
+/** Success trace lines shown in model-facing text (0–5); failure keeps full window. */
+const TURN_TRACE_CAP_SUCCESS = 5;
 /** Cap on a single rendered trace line. */
 const TRACE_LINE_MAX = 120;
-/** Default `vibe_wait` window when no timeout was given (ms). */
-const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+/** Deadman ceiling for vibe_wait: no model-facing return before this unless worker settles or steering fires. 0 sentinel means "use deadman". */
+export const VIBE_WAIT_DEADMAN_MS = 25 * 60 * 1000;
 /** Response text cap inside a delivered turn result; full output stays at agent://<id>. */
 const RESPONSE_PREVIEW_MAX = 6000;
+/** Success response preview cap (2,000–3,000); failure keeps full 6k allowance. */
+const RESPONSE_PREVIEW_MAX_SUCCESS = 2500;
 /** Grace period for Vibe cancellation/release cleanup before teardown detaches (ms). */
 const VIBE_TEARDOWN_GRACE_MS = 5_000;
 
@@ -558,7 +562,12 @@ export class VibeSessionRegistry {
 		jobId?: string;
 	}): void {
 		const now = Date.now();
-		this.#records.set(record.id, {
+		const scope: VibeOwnerScope = {
+			ownerId: record.ownerId,
+			parentSessionId: "test-parent-session",
+			parentSessionFile: null,
+		};
+		this.#records.set(scopeKey(scope, record.id), {
 			id: record.id,
 			cli: record.cli ?? "fast",
 			ownerId: record.ownerId,
@@ -1607,7 +1616,14 @@ export class VibeSessionRegistry {
 
 		let waitEndedByTimeout = false;
 		if (runningJobs.length > 0 && collectSettled().length === 0) {
-			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
+			// 0 or undefined means "use deadman ceiling" (25m), not 1ms. Caller that
+			// wants a short poll can still pass an explicit positive timeoutMs.
+			const rawTimeout = args.timeoutMs;
+			const effectiveTimeoutMs =
+				rawTimeout === undefined || rawTimeout === 0 || (typeof rawTimeout === "number" && rawTimeout < 0)
+					? VIBE_WAIT_DEADMAN_MS
+					: Math.max(1, Math.trunc(rawTimeout));
+			const timeoutMs = effectiveTimeoutMs;
 			const watchedJobIds = runningJobs.map(job => job.id);
 			manager.watchJobs(watchedJobIds);
 			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
@@ -2107,14 +2123,17 @@ export class VibeSessionRegistry {
 				: (result.lastIntent ?? result.output),
 		);
 
-		const traceLines = turn.trace.map(entry =>
+		const allTraceLines = turn.trace.map(entry =>
 			firstLine(`${entry.tool}${entry.args ? `(${entry.args})` : ""}`, TRACE_LINE_MAX),
 		);
-		const traceOverflow = Math.max(0, turn.toolCount - turn.trace.length);
+		// Success envelope is compact (≤5 trace lines, ≤2.5k response); failure keeps full caps.
+		const previewMax = failed ? RESPONSE_PREVIEW_MAX : RESPONSE_PREVIEW_MAX_SUCCESS;
+		const effectiveTraceLines = failed ? allTraceLines : allTraceLines.slice(-TURN_TRACE_CAP_SUCCESS);
+		const traceOverflow = Math.max(0, turn.toolCount - effectiveTraceLines.length);
 		let response = result.output.trim() || "(no output)";
 		let responseTruncated = false;
-		if (response.length > RESPONSE_PREVIEW_MAX) {
-			const slice = response.slice(0, RESPONSE_PREVIEW_MAX);
+		if (response.length > previewMax) {
+			const slice = response.slice(0, previewMax);
 			const lastNewline = slice.lastIndexOf("\n");
 			response = lastNewline > 0 ? slice.slice(0, lastNewline) : slice;
 			responseTruncated = true;
@@ -2131,7 +2150,7 @@ export class VibeSessionRegistry {
 					requests: result.requests,
 					toolCount: turn.toolCount,
 					model: result.resolvedModel ?? record.resolvedModel ?? "",
-					trace: traceLines,
+					trace: effectiveTraceLines,
 					traceOverflow: traceOverflow > 0 ? traceOverflow : undefined,
 					response,
 					responseTruncated,
@@ -2149,13 +2168,18 @@ export class VibeSessionRegistry {
 			text = [
 				`[vibe:${record.id} cli=${record.cli} turn=${turnIndex} status=${status}]`,
 				`Activity (${turn.toolCount} tool calls, ${result.requests} requests):`,
-				...traceLines.map(line => `- ${line}`),
+				...effectiveTraceLines.map(line => `- ${line}`),
 				"",
 				"Response:",
 				response,
+				`Full output: agent://${record.id}`,
 			].join("\n");
 		}
 		if (failed) throw new VibeTurnError(text);
+		// Always include agent:// recovery pointer — survives smaller caps.
+		if (!text.includes(`agent://${record.id}`)) {
+			text = `${text}\n\nFull output: agent://${record.id}`;
+		}
 		return text;
 	}
 }
