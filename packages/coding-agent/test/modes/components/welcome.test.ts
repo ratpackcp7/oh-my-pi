@@ -62,6 +62,14 @@ describe("WelcomeComponent", () => {
 		expect(pickWeightedTip([], 0.5)).toBe("");
 	});
 
+	it("uses the full available width on wide terminals", () => {
+		const termWidth = 160;
+		const lines = new WelcomeComponent("17.3.4", "model", "provider").render(termWidth);
+
+		const topBorder = Bun.stripANSI(lines[0] ?? "");
+		expect(Bun.stringWidth(topBorder)).toBe(termWidth - 2);
+	});
+
 	it("truncates a long model name inside the fixed left column and keeps the right column", () => {
 		// Dynamic model labels must not influence the responsive breakpoint: a
 		// long name is truncated with an ellipsis instead of collapsing the right
