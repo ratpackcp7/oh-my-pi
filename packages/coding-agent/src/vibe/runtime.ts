@@ -39,16 +39,32 @@ import { formatDuration } from "../tools/render-utils";
 import { ToolError } from "../tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
-/** The two worker CLI flavors the director drives (legacy). */
-export type VibeCli = "fast" | "good";
-
+import {
+	parseLifecycleEvent,
+	VIBE_LIFECYCLE_CUSTOM_TYPE,
+	VIBE_LIFECYCLE_VERSION,
+	type VibeCli,
+	type VibeExternalMetadata,
+	type VibeLifecycleBase,
+	type VibeLifecycleEvent,
+	type VibeRole,
+	type VibeRoutingIntent,
+	type VibeRoutingOptions,
+	type VibeSpawnLifecycleEvent,
+	type VibeTombstoneReason,
+} from "./lifecycle";
+export type { VibeCli, VibeExternalMetadata, VibeRole, VibeRoutingIntent, VibeRoutingOptions } from "./lifecycle";
+/**
+ * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
+ * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
+ * carries `model: "@task"` (inherits the session's strong model).
+ * Resolution goes through {@link resolveAgentModelSelection} exactly like a
+ * `task` spawn, so `task.agentModelOverrides` and model-role settings apply.
+ */
 export const VIBE_CLI_AGENT: Record<VibeCli, string> = {
 	fast: "sonic",
 	good: "task",
 };
-
-/** Generic role-oriented worker identities (CP7-facing + vanilla). */
-export type VibeRole = "scout" | "utility" | "implementer" | "designer" | "planner" | "reviewer";
 
 /** Minimal generic role -> bundled agent mapping (no CP7 policy tables). */
 export const VIBE_ROLE_AGENT: Record<VibeRole, string> = {
@@ -59,26 +75,6 @@ export const VIBE_ROLE_AGENT: Record<VibeRole, string> = {
 	planner: "task",
 	reviewer: "reviewer",
 };
-
-/** Generic routing intent carried through vibe lifecycle (reuses task routing vocabulary). */
-export type VibeRoutingIntent = "default" | "cheap" | "normal" | "strong" | "vision" | "large-context" | "same-pool-ok";
-
-/** Generic routing constraints the caller (e.g. CP7 adapter) may supply. */
-export interface VibeRoutingOptions {
-	excludePools?: string[];
-	preferPools?: string[];
-	allowParentPool?: boolean;
-	deadSelectors?: string[];
-}
-
-/** Generic external task linkage (Foreman etc.) — opaque to vibe core. */
-export interface VibeExternalMetadata {
-	externalTaskId?: string;
-	specPath?: string;
-	policyHash?: string;
-	policyRevision?: string;
-	label?: string;
-}
 
 /** Worker session lifecycle as shown to the director. */
 export type VibeSessionState = "starting" | "running" | "idle" | "dead";
@@ -105,9 +101,6 @@ const RESPONSE_PREVIEW_MAX_SUCCESS = 2500;
 /** Grace period for Vibe cancellation/release cleanup before teardown detaches (ms). */
 const VIBE_TEARDOWN_GRACE_MS = 5_000;
 
-const VIBE_LIFECYCLE_CUSTOM_TYPE = "vibe-session-lifecycle";
-const VIBE_LIFECYCLE_VERSION = 2;
-const VIBE_LIFECYCLE_LEGACY_VERSION = 1;
 export interface VibeOwnerScope {
 	ownerId: string;
 	parentSessionId: string;
@@ -127,62 +120,6 @@ export interface VibeParentSession {
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
 }
-
-type VibeTombstoneReason = "explicit-kill" | "mode-exit" | "spawn-failed" | "unrecoverable";
-
-interface VibeLifecycleBase {
-	version: typeof VIBE_LIFECYCLE_VERSION | typeof VIBE_LIFECYCLE_LEGACY_VERSION;
-	id: string;
-	ownerId: string;
-	parentSessionId: string;
-}
-
-interface VibeSpawnLifecycleEventV1 extends VibeLifecycleBase {
-	version: typeof VIBE_LIFECYCLE_LEGACY_VERSION;
-	action: "spawn";
-	cli: VibeCli;
-	agent: string;
-	childSessionFile: string;
-	createdAt: number;
-}
-
-interface VibeSpawnLifecycleEventV2 extends VibeLifecycleBase {
-	version: typeof VIBE_LIFECYCLE_VERSION;
-	action: "spawn";
-	cli?: VibeCli;
-	role?: VibeRole;
-	agent: string;
-	childSessionFile: string;
-	createdAt: number;
-	modelOverride?: string | string[];
-	modelRole?: string;
-	intent?: VibeRoutingIntent;
-	routing?: VibeRoutingOptions;
-	metadata?: VibeExternalMetadata;
-}
-
-type VibeSpawnLifecycleEvent = VibeSpawnLifecycleEventV1 | VibeSpawnLifecycleEventV2;
-
-interface VibeTurnLifecycleEvent extends VibeLifecycleBase {
-	action: "turn-started" | "turn-settled";
-	turn: number;
-}
-
-interface VibeTombstoneLifecycleEvent extends VibeLifecycleBase {
-	action: "tombstone";
-	reason: VibeTombstoneReason;
-}
-
-interface VibeTombstoneRevocationEvent extends VibeLifecycleBase {
-	action: "tombstone-revoked";
-	reason: "mode-exit";
-}
-
-type VibeLifecycleEvent =
-	| VibeSpawnLifecycleEvent
-	| VibeTurnLifecycleEvent
-	| VibeTombstoneLifecycleEvent
-	| VibeTombstoneRevocationEvent;
 
 interface VibeRestoreCandidate {
 	spawn: VibeSpawnLifecycleEvent;
@@ -378,142 +315,6 @@ function matchesScope(record: VibeRecord, scope: VibeOwnerScope): boolean {
 		record.parentSessionFile === scope.parentSessionFile
 	);
 }
-
-function objectRecord(value: unknown): Record<string, unknown> | undefined {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-	return value as Record<string, unknown>;
-}
-
-function parseLifecycleEvent(value: unknown): VibeLifecycleEvent | undefined {
-	const data = objectRecord(value);
-	if (!data || (data.version !== VIBE_LIFECYCLE_VERSION && data.version !== VIBE_LIFECYCLE_LEGACY_VERSION))
-		return undefined;
-	if (typeof data.id !== "string" || !data.id) return undefined;
-	if (typeof data.ownerId !== "string" || !data.ownerId) return undefined;
-	if (typeof data.parentSessionId !== "string" || !data.parentSessionId) return undefined;
-	const base: VibeLifecycleBase = {
-		version: data.version as typeof VIBE_LIFECYCLE_VERSION | typeof VIBE_LIFECYCLE_LEGACY_VERSION,
-		id: data.id,
-		ownerId: data.ownerId,
-		parentSessionId: data.parentSessionId,
-	};
-	if (data.action === "spawn") {
-		if (typeof data.agent !== "string" || typeof data.childSessionFile !== "string") return undefined;
-		if (typeof data.createdAt !== "number" || !Number.isFinite(data.createdAt)) return undefined;
-		const isV2 = data.version === VIBE_LIFECYCLE_VERSION;
-		if (isV2) {
-			const cli = data.cli === "fast" || data.cli === "good" ? (data.cli as VibeCli) : undefined;
-			const role =
-				typeof data.role === "string" && (VIBE_ROLE_AGENT as Record<string, string>)[data.role]
-					? (data.role as VibeRole)
-					: undefined;
-			if (!cli && !role) return undefined;
-			// Validate optional fields types lightly
-			const modelOverride =
-				data.modelOverride === undefined
-					? undefined
-					: Array.isArray(data.modelOverride)
-						? (data.modelOverride as string[])
-						: typeof data.modelOverride === "string"
-							? [data.modelOverride as string]
-							: undefined;
-			const modelRole = typeof data.modelRole === "string" ? data.modelRole : undefined;
-			const intent =
-				typeof data.intent === "string" &&
-				["default", "cheap", "normal", "strong", "vision", "large-context", "same-pool-ok"].includes(data.intent)
-					? (data.intent as VibeRoutingIntent)
-					: undefined;
-			let routing: VibeRoutingOptions | undefined;
-			if (data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)) {
-				const r = data.routing as Record<string, unknown>;
-				routing = {};
-				if (Array.isArray(r.excludePools))
-					routing.excludePools = r.excludePools.filter((v): v is string => typeof v === "string");
-				if (Array.isArray(r.preferPools))
-					routing.preferPools = r.preferPools.filter((v): v is string => typeof v === "string");
-				if (typeof r.allowParentPool === "boolean") routing.allowParentPool = r.allowParentPool;
-				if (Array.isArray(r.deadSelectors))
-					routing.deadSelectors = r.deadSelectors.filter((v): v is string => typeof v === "string");
-			}
-			let metadata: VibeExternalMetadata | undefined;
-			if (data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata)) {
-				const m = data.metadata as Record<string, unknown>;
-				metadata = {};
-				if (typeof m.externalTaskId === "string") metadata.externalTaskId = m.externalTaskId;
-				if (typeof m.specPath === "string") metadata.specPath = m.specPath;
-				if (typeof m.policyHash === "string") metadata.policyHash = m.policyHash;
-				if (typeof m.policyRevision === "string") metadata.policyRevision = m.policyRevision;
-				if (typeof m.label === "string") metadata.label = m.label;
-			}
-			return {
-				...base,
-				version: VIBE_LIFECYCLE_VERSION,
-				action: "spawn",
-				cli,
-				role,
-				agent: data.agent,
-				childSessionFile: data.childSessionFile,
-				createdAt: data.createdAt,
-				modelOverride,
-				modelRole,
-				intent,
-				routing,
-				metadata,
-			} as VibeSpawnLifecycleEventV2;
-		} else {
-			const cli = data.cli === "fast" || data.cli === "good" ? (data.cli as VibeCli) : undefined;
-			if (!cli) return undefined;
-			return {
-				...base,
-				version: VIBE_LIFECYCLE_LEGACY_VERSION,
-				action: "spawn",
-				cli,
-				agent: data.agent,
-				childSessionFile: data.childSessionFile,
-				createdAt: data.createdAt,
-			} as VibeSpawnLifecycleEventV1;
-		}
-	}
-	if (data.action === "turn-started" || data.action === "turn-settled") {
-		if (typeof data.turn !== "number" || !Number.isInteger(data.turn) || data.turn < 1) return undefined;
-		return { ...base, action: data.action, turn: data.turn };
-	}
-	if (data.action === "tombstone") {
-		const reason = data.reason;
-		if (
-			reason !== "explicit-kill" &&
-			reason !== "mode-exit" &&
-			reason !== "spawn-failed" &&
-			reason !== "unrecoverable"
-		) {
-			return undefined;
-		}
-		return { ...base, action: "tombstone", reason };
-	}
-	if (data.action === "tombstone-revoked" && data.reason === "mode-exit") {
-		return { ...base, action: "tombstone-revoked", reason: "mode-exit" };
-	}
-	return undefined;
-}
-
-/** Child ids claimed by valid Vibe spawn records from untrusted persisted JSON. */
-export function persistedVibeChildIds(entries: Iterable<unknown>): Set<string> {
-	const ids = new Set<string>();
-	for (const value of entries) {
-		const entry = objectRecord(value);
-		if (entry?.type !== "custom" || entry.customType !== VIBE_LIFECYCLE_CUSTOM_TYPE) continue;
-		const event = parseLifecycleEvent(entry.data);
-		if (
-			event?.action === "spawn" &&
-			/^[A-Za-z0-9_-]+$/.test(event.id) &&
-			event.childSessionFile === `${event.id}.jsonl`
-		) {
-			ids.add(event.id);
-		}
-	}
-	return ids;
-}
-
 /** Merge the monitor's rolling `recentTools` window (newest first) into the per-turn trace (oldest first). */
 function mergeTrace(turn: VibeTurn, progress: AgentProgress): void {
 	turn.toolCount = progress.toolCount;
@@ -1959,6 +1760,7 @@ export class VibeSessionRegistry {
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,
 			preloadedExtensionPaths: session.extensionPaths,
+			preloadedPreparedExtensions: session.preparedExtensions,
 			preloadedCustomToolPaths: session.customToolPaths,
 			localProtocolOptions,
 			parentArtifactManager: session.getArtifactManager?.() ?? undefined,

@@ -4761,6 +4761,133 @@ export function aiandModelManagerOptions(config?: AiandModelManagerConfig): Mode
 }
 
 // ---------------------------------------------------------------------------
+// 16.7 Yolo-Auto (yolo-auto.com)
+// ---------------------------------------------------------------------------
+
+const YOLO_AUTO_BASE_URL = "https://yolo-auto.com/v1";
+
+/**
+ * Documented Yolo-Auto catalog (yolo-auto.com/docs, 2026-08) bundled so the
+ * provider is usable when generation and first boot have no live key. The
+ * flat-rate `/v1/models` response is authoritative once discovery runs.
+ * The compat block mirrors the provider's documented wire surface: the API
+ * speaks the generic chat template with `reasoning_effort` support and rejects
+ * the `developer` role and `store` param.
+ */
+export const YOLO_AUTO_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "deepseek-flash-v4",
+		name: "DeepSeek Flash V4",
+		api: "openai-completions",
+		provider: "yolo-auto",
+		baseUrl: YOLO_AUTO_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			effortMap: {
+				[Effort.Minimal]: "low",
+				[Effort.Low]: "low",
+				[Effort.Medium]: "high",
+				[Effort.High]: "high",
+				[Effort.XHigh]: "max",
+				[Effort.Max]: "max",
+			},
+		},
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 131_072,
+		maxTokens: null,
+		compat: {
+			supportsDeveloperRole: false,
+			supportsStore: false,
+			supportsReasoningEffort: true,
+			thinkingFormat: "chat-template",
+		},
+	},
+];
+
+export interface YoloAutoModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Map a discovered entry onto its reference, then re-apply Yolo-Auto's
+ * provider-wide wire constraints. A model that only exists in another
+ * provider's bundle (e.g. `gpt-4o` served via the global reference index)
+ * would otherwise inherit that provider's token pricing and `store`-capable
+ * surface, which the flat-rate Yolo endpoint neither charges nor accepts.
+ */
+function mapYoloAutoModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	return {
+		...model,
+		// Flat-rate and no-store are provider-wide: they must win whether the
+		// reference came from the yolo bundle, the global index, or nowhere.
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		compat: {
+			...model.compat,
+			supportsStore: false,
+			supportsDeveloperRole: false,
+		},
+	};
+}
+/**
+ * Yolo-Auto model manager: OpenAI-compatible chat completions at the
+ * flat-rate `deepseek-flash-v4` endpoint. Live `/v1/models` discovery replaces the
+ * bundled seed once a key is stored or present in `YOLO_AUTO_API_KEY`. Models
+ * the provider adds later inherit metadata (reasoning, thinking, context)
+ * from the global bundled reference index, so new ids work without a per-id
+ * code change.
+ */
+export function yoloAutoModelManagerOptions(
+	config?: YoloAutoModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	// Curated static models take precedence over the previously generated
+	// bundle so later corrections to the curated metadata are honored; bundle
+	// rows keep ids that earlier credentialed runs discovered, and the global
+	// index covers everything else.
+	const references = new Map<string, ModelSpec<"openai-completions">>();
+	const bundled = createBundledReferenceMap<"openai-completions">("yolo-auto");
+	for (const model of bundled.values()) {
+		references.set(model.id, model);
+	}
+	for (const model of YOLO_AUTO_STATIC_MODELS) {
+		const previous = references.get(model.id);
+		references.set(model.id, {
+			...previous,
+			...model,
+			// Generation-filled fields the curated seed leaves null: keep the
+			// canonical values baked by the previous regen (max-output cap,
+			// derived thinking) instead of dropping them.
+			maxTokens: model.maxTokens ?? previous?.maxTokens ?? null,
+			thinking: model.thinking ?? previous?.thinking,
+		});
+	}
+	const resolveReference = createReferenceResolver(() => references);
+	return {
+		...createOpenAICompatibleModelManagerOptions({
+			api: "openai-completions",
+			providerId: "yolo-auto",
+			defaultBaseUrl: YOLO_AUTO_BASE_URL,
+			config,
+			requireApiKey: true,
+			mapModel: (entry, defaults, reference) =>
+				mapYoloAutoModel(entry, defaults, resolveReference(defaults.id) ?? reference),
+			dynamicModelsAuthoritative: true,
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // 17. Qwen Portal
 // ---------------------------------------------------------------------------
 
@@ -4927,6 +5054,7 @@ type LiteLLMRichEndpointModel<TApi extends Api> = {
 	hasToolMetadata: boolean;
 	hasSupportedOpenAIParams: boolean;
 	hasCost: boolean;
+	reportedCost: Partial<ModelSpec<Api>["cost"]>;
 };
 type LiteLLMRichEndpointFailure = {
 	endpoint: string;
@@ -5051,30 +5179,36 @@ function getLiteLLMParams(entry: LiteLLMRichModelEntry): LiteLLMRichModelEntry |
 function getLiteLLMMetadataValue(entry: LiteLLMRichModelEntry, key: string): unknown {
 	return entry[key] ?? getLiteLLMModelInfo(entry)?.[key];
 }
-
-/** Per-million USD cost from a `*_per_token` LiteLLM field, or `undefined` when absent/non-positive. */
+/** Per-million USD cost from a positive `*_per_token` LiteLLM field. */
 function getLiteLLMPerMillionCost(entry: LiteLLMRichModelEntry, key: string): number | undefined {
 	const perToken = toNumber(getLiteLLMMetadataValue(entry, key));
 	return perToken !== undefined && perToken > 0 ? perToken * 1_000_000 : undefined;
 }
 
-/**
- * Map LiteLLM's per-token pricing (`input_cost_per_token`, `output_cost_per_token`,
- * cache costs) onto {@link ModelSpec.cost} in $/million tokens. Returns `undefined`
- * when LiteLLM reports neither an input nor an output price so callers keep the
- * bundled reference cost.
- */
-function getLiteLLMCost(entry: LiteLLMRichModelEntry): ModelSpec<Api>["cost"] | undefined {
+/** Map positive LiteLLM per-token prices onto their per-million cost fields. */
+function getLiteLLMReportedCost(entry: LiteLLMRichModelEntry): Partial<ModelSpec<Api>["cost"]> {
 	const input = getLiteLLMPerMillionCost(entry, "input_cost_per_token");
 	const output = getLiteLLMPerMillionCost(entry, "output_cost_per_token");
-	if (input === undefined && output === undefined) {
+	const cacheRead = getLiteLLMPerMillionCost(entry, "cache_read_input_token_cost");
+	const cacheWrite = getLiteLLMPerMillionCost(entry, "cache_creation_input_token_cost");
+	return {
+		...(input !== undefined ? { input } : {}),
+		...(output !== undefined ? { output } : {}),
+		...(cacheRead !== undefined ? { cacheRead } : {}),
+		...(cacheWrite !== undefined ? { cacheWrite } : {}),
+	};
+}
+
+function getLiteLLMCost(entry: LiteLLMRichModelEntry): ModelSpec<Api>["cost"] | undefined {
+	const cost = getLiteLLMReportedCost(entry);
+	if (cost.input === undefined && cost.output === undefined) {
 		return undefined;
 	}
 	return {
-		input: input ?? 0,
-		output: output ?? 0,
-		cacheRead: getLiteLLMPerMillionCost(entry, "cache_read_input_token_cost") ?? 0,
-		cacheWrite: getLiteLLMPerMillionCost(entry, "cache_creation_input_token_cost") ?? 0,
+		input: cost.input ?? 0,
+		output: cost.output ?? 0,
+		cacheRead: cost.cacheRead ?? 0,
+		cacheWrite: cost.cacheWrite ?? 0,
 	};
 }
 
@@ -5274,13 +5408,23 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
-		cost: next.hasCost ? next.model.cost : existing.model.cost,
+		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
 		compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
 	};
 	if (next.hasToolMetadata) {
 		model.supportsTools = next.model.supportsTools;
 	}
-	return { ...next, apiRoute, model };
+	return {
+		...next,
+		apiRoute,
+		model,
+		reportedCost: { ...existing.reportedCost, ...next.reportedCost },
+		hasContextWindow: existing.hasContextWindow || next.hasContextWindow,
+		hasMaxTokens: existing.hasMaxTokens || next.hasMaxTokens,
+		hasToolMetadata: existing.hasToolMetadata || next.hasToolMetadata,
+		hasSupportedOpenAIParams: existing.hasSupportedOpenAIParams || next.hasSupportedOpenAIParams,
+		hasCost: existing.hasCost || next.hasCost,
+	};
 }
 
 async function fetchLiteLLMRichEndpoint<TApi extends Api>(
@@ -5342,6 +5486,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 					supportedOpenAIParams !== undefined,
 				hasSupportedOpenAIParams: supportedOpenAIParams !== undefined,
 				hasCost: getLiteLLMCost(entry) !== undefined,
+				reportedCost: getLiteLLMReportedCost(entry),
 			};
 			const existing = deduped.get(model.id);
 			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next) : next);
@@ -5403,7 +5548,12 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 			for (const entry of deduped.values()) {
 				if (
 					(entry.supportsVision !== true && entry.supportsVision !== false) ||
-					(options.resolveApi !== undefined && entry.apiRoute === "unknown")
+					(options.resolveApi !== undefined && entry.apiRoute === "unknown") ||
+					(Object.keys(entry.reportedCost).length > 0 &&
+						(entry.reportedCost.input === undefined ||
+							entry.reportedCost.output === undefined ||
+							entry.reportedCost.cacheRead === undefined ||
+							entry.reportedCost.cacheWrite === undefined))
 				) {
 					needsMoreMetadata = true;
 					break;
@@ -5440,12 +5590,12 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v6 invalidates rows cached before OpenAI models moved to Responses.
-		// Earlier versions added bundled reference fallback, continued discovery
-		// past incomplete `/model_group/info`, stripped reseller usage suffixes,
-		// filtered placeholder-only `all-team-models` rows, and mapped rich pricing.
-		// Bump the version whenever the mappers below change, or warm authoritative
-		// caches keep serving pre-change rows for the full TTL.
+		// rich-v7 invalidates rows cached before discovery continued past endpoints
+		// that omitted cache pricing. Earlier versions added bundled reference fallback,
+		// moved OpenAI models to Responses, continued past incomplete vision and API
+		// metadata, stripped reseller usage suffixes, filtered placeholder rows, and
+		// mapped rich pricing. Bump the version whenever these mappers change, or warm
+		// authoritative caches keep serving pre-change rows for the full TTL.
 		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
