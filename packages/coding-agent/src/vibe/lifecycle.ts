@@ -22,19 +22,19 @@ export type VibeRoutingIntent = "default" | "cheap" | "normal" | "strong" | "vis
 
 /** Generic routing constraints the caller may supply. */
 export interface VibeRoutingOptions {
-\texcludePools?: string[];
-\tpreferPools?: string[];
-\tallowParentPool?: boolean;
-\tdeadSelectors?: string[];
+	excludePools?: string[];
+	preferPools?: string[];
+	allowParentPool?: boolean;
+	deadSelectors?: string[];
 }
 
 /** Generic external task linkage — opaque to vibe core. */
 export interface VibeExternalMetadata {
-\texternalTaskId?: string;
-\tspecPath?: string;
-\tpolicyHash?: string;
-\tpolicyRevision?: string;
-\tlabel?: string;
+	externalTaskId?: string;
+	specPath?: string;
+	policyHash?: string;
+	policyRevision?: string;
+	label?: string;
 }
 
 /** Custom-entry type tag for persisted Vibe lifecycle events. */
@@ -47,206 +47,212 @@ export const VIBE_LIFECYCLE_LEGACY_VERSION = 1;
 export type VibeTombstoneReason = "explicit-kill" | "mode-exit" | "spawn-failed" | "unrecoverable";
 
 export interface VibeLifecycleBase {
-\tversion: typeof VIBE_LIFECYCLE_VERSION | typeof VIBE_LIFECYCLE_LEGACY_VERSION;
-\tid: string;
-\townerId: string;
-\tparentSessionId: string;
+	version: typeof VIBE_LIFECYCLE_VERSION | typeof VIBE_LIFECYCLE_LEGACY_VERSION;
+	id: string;
+	ownerId: string;
+	parentSessionId: string;
 }
 
 export interface VibeSpawnLifecycleEventV1 extends VibeLifecycleBase {
-\tversion: typeof VIBE_LIFECYCLE_LEGACY_VERSION;
-\taction: "spawn";
-\tcli: VibeCli;
-\tagent: string;
-\tchildSessionFile: string;
-\tcreatedAt: number;
+	version: typeof VIBE_LIFECYCLE_LEGACY_VERSION;
+	action: "spawn";
+	cli: VibeCli;
+	agent: string;
+	childSessionFile: string;
+	createdAt: number;
 }
 
 export interface VibeSpawnLifecycleEventV2 extends VibeLifecycleBase {
-\tversion: typeof VIBE_LIFECYCLE_VERSION;
-\taction: "spawn";
-\tcli?: VibeCli;
-\trole?: VibeRole;
-\tagent: string;
-\tchildSessionFile: string;
-\tcreatedAt: number;
-\tmodelOverride?: string | string[];
-\tmodelRole?: string;
-\tintent?: VibeRoutingIntent;
-\trouting?: VibeRoutingOptions;
-\tmetadata?: VibeExternalMetadata;
+	version: typeof VIBE_LIFECYCLE_VERSION;
+	action: "spawn";
+	cli?: VibeCli;
+	role?: VibeRole;
+	agent: string;
+	childSessionFile: string;
+	createdAt: number;
+	modelOverride?: string | string[];
+	modelRole?: string;
+	intent?: VibeRoutingIntent;
+	routing?: VibeRoutingOptions;
+	metadata?: VibeExternalMetadata;
 }
 
 export type VibeSpawnLifecycleEvent = VibeSpawnLifecycleEventV1 | VibeSpawnLifecycleEventV2;
 
 export interface VibeTurnLifecycleEvent extends VibeLifecycleBase {
-\taction: "turn-started" | "turn-settled";
-\tturn: number;
+	action: "turn-started" | "turn-settled";
+	turn: number;
 }
 
 export interface VibeTombstoneLifecycleEvent extends VibeLifecycleBase {
-\taction: "tombstone";
-\treason: VibeTombstoneReason;
+	action: "tombstone";
+	reason: VibeTombstoneReason;
 }
 
 export interface VibeTombstoneRevocationEvent extends VibeLifecycleBase {
-\taction: "tombstone-revoked";
-\treason: "mode-exit";
+	action: "tombstone-revoked";
+	reason: "mode-exit";
 }
 
 export type VibeLifecycleEvent =
-\t| VibeSpawnLifecycleEvent
-\t| VibeTurnLifecycleEvent
-\t| VibeTombstoneLifecycleEvent
-\t| VibeTombstoneRevocationEvent;
+	| VibeSpawnLifecycleEvent
+	| VibeTurnLifecycleEvent
+	| VibeTombstoneLifecycleEvent
+	| VibeTombstoneRevocationEvent;
 
 const VIBE_ROLES = new Set<VibeRole>(["scout", "utility", "implementer", "designer", "planner", "reviewer"]);
 const VIBE_ROUTING_INTENTS = new Set<VibeRoutingIntent>([
-\t"default",
-\t"cheap",
-\t"normal",
-\t"strong",
-\t"vision",
-\t"large-context",
-\t"same-pool-ok",
+	"default",
+	"cheap",
+	"normal",
+	"strong",
+	"vision",
+	"large-context",
+	"same-pool-ok",
 ]);
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
-\tif (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-\treturn value as Record<string, unknown>;
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	return value as Record<string, unknown>;
 }
 
 /** Parse one persisted lifecycle payload; `undefined` for foreign/malformed data. */
 export function parseLifecycleEvent(value: unknown): VibeLifecycleEvent | undefined {
-\tconst data = objectRecord(value);
-\tif (!data || (data.version !== VIBE_LIFECYCLE_VERSION && data.version !== VIBE_LIFECYCLE_LEGACY_VERSION)) {
-\t\treturn undefined;
-\t}
-\tif (typeof data.id !== "string" || !data.id) return undefined;
-\tif (typeof data.ownerId !== "string" || !data.ownerId) return undefined;
-\tif (typeof data.parentSessionId !== "string" || !data.parentSessionId) return undefined;
+	const data = objectRecord(value);
+	if (!data || (data.version !== VIBE_LIFECYCLE_VERSION && data.version !== VIBE_LIFECYCLE_LEGACY_VERSION)) {
+		return undefined;
+	}
+	if (typeof data.id !== "string" || !data.id) return undefined;
+	if (typeof data.ownerId !== "string" || !data.ownerId) return undefined;
+	if (typeof data.parentSessionId !== "string" || !data.parentSessionId) return undefined;
 
-\tconst base: VibeLifecycleBase = {
-\t\tversion: data.version,
-\t\tid: data.id,
-\t\townerId: data.ownerId,
-\t\tparentSessionId: data.parentSessionId,
-\t};
+	const base: VibeLifecycleBase = {
+		version: data.version,
+		id: data.id,
+		ownerId: data.ownerId,
+		parentSessionId: data.parentSessionId,
+	};
 
-\tif (data.action === "spawn") {
-\t\tif (typeof data.agent !== "string" || typeof data.childSessionFile !== "string") return undefined;
-\t\tif (typeof data.createdAt !== "number" || !Number.isFinite(data.createdAt)) return undefined;
+	if (data.action === "spawn") {
+		if (typeof data.agent !== "string" || typeof data.childSessionFile !== "string") return undefined;
+		if (typeof data.createdAt !== "number" || !Number.isFinite(data.createdAt)) return undefined;
 
-\t\tif (data.version === VIBE_LIFECYCLE_VERSION) {
-\t\t\tconst cli = data.cli === "fast" || data.cli === "good" ? data.cli : undefined;
-\t\t\tconst role = typeof data.role === "string" && VIBE_ROLES.has(data.role as VibeRole) ? (data.role as VibeRole) : undefined;
-\t\t\tif (!cli && !role) return undefined;
+		if (data.version === VIBE_LIFECYCLE_VERSION) {
+			const cli = data.cli === "fast" || data.cli === "good" ? data.cli : undefined;
+			const role =
+				typeof data.role === "string" && VIBE_ROLES.has(data.role as VibeRole)
+					? (data.role as VibeRole)
+					: undefined;
+			if (!cli && !role) return undefined;
 
-\t\t\tlet modelOverride: string | string[] | undefined;
-\t\t\tif (Array.isArray(data.modelOverride)) {
-\t\t\t\tif (!data.modelOverride.every(value => typeof value === "string")) return undefined;
-\t\t\t\tmodelOverride = data.modelOverride as string[];
-\t\t\t} else if (typeof data.modelOverride === "string") {
-\t\t\t\tmodelOverride = [data.modelOverride];
-\t\t\t} else if (data.modelOverride !== undefined) {
-\t\t\t\treturn undefined;
-\t\t\t}
+			let modelOverride: string | string[] | undefined;
+			if (Array.isArray(data.modelOverride)) {
+				if (!data.modelOverride.every(value => typeof value === "string")) return undefined;
+				modelOverride = data.modelOverride as string[];
+			} else if (typeof data.modelOverride === "string") {
+				modelOverride = [data.modelOverride];
+			} else if (data.modelOverride !== undefined) {
+				return undefined;
+			}
 
-\t\t\tconst modelRole = typeof data.modelRole === "string" ? data.modelRole : undefined;
-\t\t\tconst intent =
-\t\t\t\ttypeof data.intent === "string" && VIBE_ROUTING_INTENTS.has(data.intent as VibeRoutingIntent)
-\t\t\t\t\t? (data.intent as VibeRoutingIntent)
-\t\t\t\t\t: undefined;
+			const modelRole = typeof data.modelRole === "string" ? data.modelRole : undefined;
+			const intent =
+				typeof data.intent === "string" && VIBE_ROUTING_INTENTS.has(data.intent as VibeRoutingIntent)
+					? (data.intent as VibeRoutingIntent)
+					: undefined;
 
-\t\t\tlet routing: VibeRoutingOptions | undefined;
-\t\t\tif (data.routing !== undefined) {
-\t\t\t\tconst raw = objectRecord(data.routing);
-\t\t\t\tif (!raw) return undefined;
-\t\t\t\trouting = {};
-\t\t\t\tif (Array.isArray(raw.excludePools)) routing.excludePools = raw.excludePools.filter((v): v is string => typeof v === "string");
-\t\t\t\tif (Array.isArray(raw.preferPools)) routing.preferPools = raw.preferPools.filter((v): v is string => typeof v === "string");
-\t\t\t\tif (typeof raw.allowParentPool === "boolean") routing.allowParentPool = raw.allowParentPool;
-\t\t\t\tif (Array.isArray(raw.deadSelectors)) routing.deadSelectors = raw.deadSelectors.filter((v): v is string => typeof v === "string");
-\t\t\t}
+			let routing: VibeRoutingOptions | undefined;
+			if (data.routing !== undefined) {
+				const raw = objectRecord(data.routing);
+				if (!raw) return undefined;
+				routing = {};
+				if (Array.isArray(raw.excludePools))
+					routing.excludePools = raw.excludePools.filter((v): v is string => typeof v === "string");
+				if (Array.isArray(raw.preferPools))
+					routing.preferPools = raw.preferPools.filter((v): v is string => typeof v === "string");
+				if (typeof raw.allowParentPool === "boolean") routing.allowParentPool = raw.allowParentPool;
+				if (Array.isArray(raw.deadSelectors))
+					routing.deadSelectors = raw.deadSelectors.filter((v): v is string => typeof v === "string");
+			}
 
-\t\t\tlet metadata: VibeExternalMetadata | undefined;
-\t\t\tif (data.metadata !== undefined) {
-\t\t\t\tconst raw = objectRecord(data.metadata);
-\t\t\t\tif (!raw) return undefined;
-\t\t\t\tmetadata = {};
-\t\t\t\tif (typeof raw.externalTaskId === "string") metadata.externalTaskId = raw.externalTaskId;
-\t\t\t\tif (typeof raw.specPath === "string") metadata.specPath = raw.specPath;
-\t\t\t\tif (typeof raw.policyHash === "string") metadata.policyHash = raw.policyHash;
-\t\t\t\tif (typeof raw.policyRevision === "string") metadata.policyRevision = raw.policyRevision;
-\t\t\t\tif (typeof raw.label === "string") metadata.label = raw.label;
-\t\t\t}
+			let metadata: VibeExternalMetadata | undefined;
+			if (data.metadata !== undefined) {
+				const raw = objectRecord(data.metadata);
+				if (!raw) return undefined;
+				metadata = {};
+				if (typeof raw.externalTaskId === "string") metadata.externalTaskId = raw.externalTaskId;
+				if (typeof raw.specPath === "string") metadata.specPath = raw.specPath;
+				if (typeof raw.policyHash === "string") metadata.policyHash = raw.policyHash;
+				if (typeof raw.policyRevision === "string") metadata.policyRevision = raw.policyRevision;
+				if (typeof raw.label === "string") metadata.label = raw.label;
+			}
 
-\t\t\treturn {
-\t\t\t\t...base,
-\t\t\t\tversion: VIBE_LIFECYCLE_VERSION,
-\t\t\t\taction: "spawn",
-\t\t\t\tcli,
-\t\t\t\trole,
-\t\t\t\tagent: data.agent,
-\t\t\t\tchildSessionFile: data.childSessionFile,
-\t\t\t\tcreatedAt: data.createdAt,
-\t\t\t\tmodelOverride,
-\t\t\t\tmodelRole,
-\t\t\t\tintent,
-\t\t\t\trouting,
-\t\t\t\tmetadata,
-\t\t\t};
-\t\t}
+			return {
+				...base,
+				version: VIBE_LIFECYCLE_VERSION,
+				action: "spawn",
+				cli,
+				role,
+				agent: data.agent,
+				childSessionFile: data.childSessionFile,
+				createdAt: data.createdAt,
+				modelOverride,
+				modelRole,
+				intent,
+				routing,
+				metadata,
+			};
+		}
 
-\t\tconst cli = data.cli === "fast" || data.cli === "good" ? data.cli : undefined;
-\t\tif (!cli) return undefined;
-\t\treturn {
-\t\t\t...base,
-\t\t\tversion: VIBE_LIFECYCLE_LEGACY_VERSION,
-\t\t\taction: "spawn",
-\t\t\tcli,
-\t\t\tagent: data.agent,
-\t\t\tchildSessionFile: data.childSessionFile,
-\t\t\tcreatedAt: data.createdAt,
-\t\t};
-\t}
+		const cli = data.cli === "fast" || data.cli === "good" ? data.cli : undefined;
+		if (!cli) return undefined;
+		return {
+			...base,
+			version: VIBE_LIFECYCLE_LEGACY_VERSION,
+			action: "spawn",
+			cli,
+			agent: data.agent,
+			childSessionFile: data.childSessionFile,
+			createdAt: data.createdAt,
+		};
+	}
 
-\tif (data.action === "turn-started" || data.action === "turn-settled") {
-\t\tif (typeof data.turn !== "number" || !Number.isInteger(data.turn) || data.turn < 1) return undefined;
-\t\treturn { ...base, action: data.action, turn: data.turn };
-\t}
-\tif (data.action === "tombstone") {
-\t\tconst reason = data.reason;
-\t\tif (
-\t\t\treason !== "explicit-kill" &&
-\t\t\treason !== "mode-exit" &&
-\t\t\treason !== "spawn-failed" &&
-\t\t\treason !== "unrecoverable"
-\t\t) {
-\t\t\treturn undefined;
-\t\t}
-\t\treturn { ...base, action: "tombstone", reason };
-\t}
-\tif (data.action === "tombstone-revoked" && data.reason === "mode-exit") {
-\t\treturn { ...base, action: "tombstone-revoked", reason: "mode-exit" };
-\t}
-\treturn undefined;
+	if (data.action === "turn-started" || data.action === "turn-settled") {
+		if (typeof data.turn !== "number" || !Number.isInteger(data.turn) || data.turn < 1) return undefined;
+		return { ...base, action: data.action, turn: data.turn };
+	}
+	if (data.action === "tombstone") {
+		const reason = data.reason;
+		if (
+			reason !== "explicit-kill" &&
+			reason !== "mode-exit" &&
+			reason !== "spawn-failed" &&
+			reason !== "unrecoverable"
+		) {
+			return undefined;
+		}
+		return { ...base, action: "tombstone", reason };
+	}
+	if (data.action === "tombstone-revoked" && data.reason === "mode-exit") {
+		return { ...base, action: "tombstone-revoked", reason: "mode-exit" };
+	}
+	return undefined;
 }
 
 /** Child ids claimed by valid Vibe spawn records from untrusted persisted JSON. */
 export function persistedVibeChildIds(entries: Iterable<unknown>): Set<string> {
-\tconst ids = new Set<string>();
-\tfor (const value of entries) {
-\t\tconst entry = objectRecord(value);
-\t\tif (entry?.type !== "custom" || entry.customType !== VIBE_LIFECYCLE_CUSTOM_TYPE) continue;
-\t\tconst event = parseLifecycleEvent(entry.data);
-\t\tif (
-\t\t\tevent?.action === "spawn" &&
-\t\t\t/^[A-Za-z0-9_-]+$/.test(event.id) &&
-\t\t\tevent.childSessionFile === `${event.id}.jsonl`
-\t\t) {
-\t\t\tids.add(event.id);
-\t\t}
-\t}
-\treturn ids;
+	const ids = new Set<string>();
+	for (const value of entries) {
+		const entry = objectRecord(value);
+		if (entry?.type !== "custom" || entry.customType !== VIBE_LIFECYCLE_CUSTOM_TYPE) continue;
+		const event = parseLifecycleEvent(entry.data);
+		if (
+			event?.action === "spawn" &&
+			/^[A-Za-z0-9_-]+$/.test(event.id) &&
+			event.childSessionFile === `${event.id}.jsonl`
+		) {
+			ids.add(event.id);
+		}
+	}
+	return ids;
 }

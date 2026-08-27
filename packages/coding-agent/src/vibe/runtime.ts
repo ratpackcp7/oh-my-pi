@@ -51,8 +51,11 @@ import {
 	type VibeRoutingIntent,
 	type VibeRoutingOptions,
 	type VibeSpawnLifecycleEvent,
+	type VibeSpawnLifecycleEventV1,
+	type VibeSpawnLifecycleEventV2,
 	type VibeTombstoneReason,
 } from "./lifecycle";
+
 export type { VibeCli, VibeExternalMetadata, VibeRole, VibeRoutingIntent, VibeRoutingOptions } from "./lifecycle";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
