@@ -269,7 +269,7 @@ describe("composer welcome native-history resize", () => {
 
 		const narrow = plainBuffer(terminal);
 		expect(countRows(narrow, "Welcome back!")).toBe(1);
-		// Box width tracks the terminal: min(100, 60 - 2) = 58 columns.
+		// Box width tracks the terminal: 60 - 2 = 58 columns.
 		expect(Math.max(...narrow.map(row => visibleWidth(row)))).toBeLessThanOrEqual(58);
 
 		terminal.resize(100, 12);

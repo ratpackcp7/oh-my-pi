@@ -261,9 +261,9 @@ export class WelcomeComponent implements Component {
 	}
 
 	#renderLines(termWidth: number): string[] {
-		// Box dimensions - responsive with max width and small-terminal support
-		const maxWidth = 100;
-		const boxWidth = Math.min(maxWidth, Math.max(0, termWidth - 2));
+		// Fill the available terminal width while retaining the outer margin and
+		// small-terminal guard. The previous 100-column cap wasted wide layouts.
+		const boxWidth = Math.max(0, termWidth - 2);
 		if (boxWidth < 4) {
 			return [];
 		}
