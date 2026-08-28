@@ -5193,6 +5193,12 @@ export const SETTINGS_SCHEMA = {
 		default: {} as Record<string, string>,
 		description: "Per-agent routing intent defaults (agent name → intent string)",
 	},
+	"task.routing.agentModels": {
+		type: "record",
+		default: {} as Record<string, string[]>,
+		description:
+			"Per-agent routed model rosters (agent name → model selectors). When configured, routing for that agent is restricted to this roster instead of the global worker candidate set",
+	},
 	"task.routing.maxContractReroutes": {
 		type: "number",
 		default: 1,

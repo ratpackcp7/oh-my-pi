@@ -417,7 +417,8 @@ export async function resolveEffectiveSubagentPolicy(
 			}
 		}
 		try {
-			const snapshot = await buildRoutingSnapshot(request.session);
+			const configuredAgentModels = request.session.settings.get("task.routing.agentModels")[agentName];
+			const snapshot = await buildRoutingSnapshot(request.session, configuredAgentModels);
 			routingCandidates = snapshot.candidates;
 			routingParentPool = snapshot.parentPool;
 			const preferredSelector = modelOverride?.[0];

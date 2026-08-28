@@ -65,7 +65,10 @@ export function resolveParentPoolIdentity(session: ToolSession): ResourcePoolIde
  * AuthStorage.getModelUsageHealth() here is unsafe because a cold usage cache
  * can fetch provider quota endpoints and block task preflight.
  */
-export async function buildRoutingSnapshot(session: ToolSession): Promise<{
+export async function buildRoutingSnapshot(
+	session: ToolSession,
+	agentPatterns?: readonly string[],
+): Promise<{
 	candidates: RoutingCandidateInput[];
 	parentPool?: ResourcePoolIdentity;
 }> {
@@ -89,9 +92,14 @@ export async function buildRoutingSnapshot(session: ToolSession): Promise<{
 	const concreteAgentOverrides = Object.values(session.settings.get("task.agentModelOverrides"))
 		.flat()
 		.filter((pattern): pattern is string => typeof pattern === "string" && isConcreteWorkerPattern(pattern));
+	const scopedAgentPatterns = agentPatterns?.filter(isConcreteWorkerPattern) ?? [];
 	const intentionalPatterns = [...intentionalWorkerModels, ...concreteModelRoles, ...concreteAgentOverrides];
 	const eligiblePatterns =
-		intentionalPatterns.length > 0 ? intentionalPatterns : ([...CONCRETE_PRIORITY_ROSTER] as string[]);
+		scopedAgentPatterns.length > 0
+			? scopedAgentPatterns
+			: intentionalPatterns.length > 0
+				? intentionalPatterns
+				: ([...CONCRETE_PRIORITY_ROSTER] as string[]);
 	const filtered: Model<Api>[] = [];
 	const rankBySelector = new Map<string, number>();
 	for (const model of filterAvailableModelsByEnabledPatterns(authorized, eligiblePatterns, session.settings)) {

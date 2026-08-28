@@ -99,6 +99,82 @@ describe("worker eligibility — broad alias must not admit stale catalog models
 		auth.close();
 	});
 
+	it("agent-scoped roster excludes unrelated globally eligible models", async () => {
+		const auth = await AuthStorage.create(":memory:");
+		await auth.set("google-antigravity", { type: "api_key", key: "agy" });
+		await auth.set("meta", { type: "api_key", key: "meta" });
+		await auth.set("cursor", { type: "api_key", key: "cursor" });
+		const fakeAvailable = [
+			{
+				provider: "google-antigravity",
+				id: "gemini-3.7-flash",
+				input: ["text"],
+				supportsTools: true,
+				contextWindow: 1_000_000,
+				cost: { input: 0.1, output: 0.1 },
+				reasoning: true,
+				baseUrl: "https://agy.example",
+			},
+			{
+				provider: "meta",
+				id: "muse-spark-1.2-contributor",
+				input: ["text"],
+				supportsTools: true,
+				contextWindow: 1_000_000,
+				cost: { input: 0, output: 0 },
+				reasoning: true,
+				baseUrl: "https://meta.example",
+			},
+			{
+				provider: "cursor",
+				id: "composer-2.5",
+				input: ["text"],
+				supportsTools: true,
+				contextWindow: 200_000,
+				cost: { input: 0.2, output: 0.2 },
+				reasoning: true,
+				baseUrl: "https://cursor.example",
+			},
+			{
+				provider: "cursor",
+				id: "cursor-grok-4.6",
+				input: ["text"],
+				supportsTools: true,
+				contextWindow: 200_000,
+				cost: { input: 0.2, output: 0.2 },
+				reasoning: true,
+				baseUrl: "https://cursor.example",
+			},
+		] as unknown as Model<never>[];
+		const registry = {
+			getAvailable: () => fakeAvailable,
+			hasConfiguredAuth: () => true,
+			getProviderBaseUrl: (p: string) => fakeAvailable.find(x => x.provider === p)?.baseUrl as string | undefined,
+			authStorage: auth,
+		} as unknown as ModelRegistry;
+		const session = sessionWithRegistry(auth, registry, {
+			"task.routing.workerModels": ["cursor/cursor-grok-4.6"] as string[],
+			"task.routing.enabled": true,
+			"task.routing.avoidParentPool": false,
+			"task.routing.parentPoolFallback": "allow",
+			"task.routing.excludePools": [] as string[],
+			"task.routing.preferPools": [] as string[],
+			"task.routing.agentIntents": {} as Record<string, string>,
+			"task.routing.agentModels": {} as Record<string, string[]>,
+			"task.routing.maxContractReroutes": 1,
+			"retry.usageReservePct": 10,
+		});
+		const scoutRoster = [
+			"google-antigravity/gemini-3.7-flash",
+			"meta/muse-spark-1.2-contributor",
+			"cursor/composer-2.5",
+		];
+		const snap = await buildRoutingSnapshot(session, scoutRoster);
+		expect(snap.candidates.map(c => c.selector).sort()).toEqual([...scoutRoster].sort());
+		expect(snap.candidates.map(c => c.selector)).not.toContain("cursor/cursor-grok-4.6");
+		auth.close();
+	});
+
 	it("concrete workerModels roster still admits its intentional models", async () => {
 		const auth = await AuthStorage.create(":memory:");
 		await auth.set("cursor", { type: "api_key", key: "k" });

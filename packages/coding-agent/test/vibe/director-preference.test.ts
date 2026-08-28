@@ -70,6 +70,33 @@ describe("director preference: role vs cli", () => {
 		expect(docsVibe).toContain("preferred when managed");
 	});
 
+	it("role defaults classify scout as cheap without requiring the caller to repeat intent", async () => {
+		const settings = Settings.isolated();
+		const reg = VibeSessionRegistry.global();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(
+			async opts =>
+				({
+					index: 0,
+					id: opts.id,
+					agent: opts.agent.name,
+					agentSource: "bundled",
+					task: opts.task,
+					exitCode: 0,
+					output: "done",
+					stderr: "",
+					truncated: false,
+					durationMs: 1,
+					tokens: 0,
+					requests: 0,
+				}) as SingleResult,
+		);
+
+		const { id } = await reg.spawn(makeParentSession(settings), { role: "scout", prompt: "inspect" });
+		const screen = reg.screens(makeParentSession(settings)).find(s => s.id === id);
+		expect(screen?.role).toBe("scout");
+		expect(screen?.intent).toBe("cheap");
+	});
+
 	it("managed implementer+reviewer workflow uses role names, not good twice, and reviewer avoids implementer family", async () => {
 		const settings = Settings.isolated();
 		const reg = VibeSessionRegistry.global();

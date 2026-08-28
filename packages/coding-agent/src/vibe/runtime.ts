@@ -79,6 +79,16 @@ export const VIBE_ROLE_AGENT: Record<VibeRole, string> = {
 	reviewer: "reviewer",
 };
 
+/** Default routing intent for each generic Vibe role. */
+const VIBE_ROLE_INTENT: Record<VibeRole, VibeRoutingIntent> = {
+	scout: "cheap",
+	utility: "cheap",
+	implementer: "strong",
+	designer: "strong",
+	planner: "strong",
+	reviewer: "strong",
+};
+
 /** Worker session lifecycle as shown to the director. */
 export type VibeSessionState = "starting" | "running" | "idle" | "dead";
 
@@ -527,8 +537,11 @@ export class VibeSessionRegistry {
 			"large-context",
 			"same-pool-ok",
 		]);
-		const routingIntent: VibeRoutingIntent =
-			options.intent && validIntents.has(options.intent) ? options.intent : "default";
+		const configuredIntent = session.settings.get("task.routing.agentIntents")[agentName];
+		const rawIntent = options.intent ?? configuredIntent ?? VIBE_ROLE_INTENT[role];
+		const routingIntent: VibeRoutingIntent = validIntents.has(rawIntent as VibeRoutingIntent)
+			? (rawIntent as VibeRoutingIntent)
+			: VIBE_ROLE_INTENT[role];
 		const policyFromSettings = getRoutingPolicyFromSettings(session as unknown as ToolSession);
 		const policy = {
 			enabled: policyFromSettings.enabled,
@@ -557,7 +570,8 @@ export class VibeSessionRegistry {
 				metadata: options.metadata,
 			};
 		try {
-			const snapshot = await buildRoutingSnapshot(session as unknown as ToolSession);
+			const configuredAgentModels = session.settings.get("task.routing.agentModels")[agentName];
+			const snapshot = await buildRoutingSnapshot(session as unknown as ToolSession, configuredAgentModels);
 			const candidates = snapshot.candidates;
 			const parentPool = snapshot.parentPool;
 			const preferredSelector = modelOverride?.[0];
