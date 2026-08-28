@@ -13,17 +13,11 @@ function sessionWithRegistry(
 	overrides: Record<string, unknown>,
 ): ToolSession {
 	const base = {
-		cwd: "/tmp",
-		hasUI: false,
-		settings: Settings.isolated(overrides as Record<string, unknown>),
-		getSessionId: () => "test",
-		getActiveModelString: () => "anthropic/claude-sonnet-4-5",
-		getModelString: () => "anthropic/claude-sonnet-4-5",
-		taskDepth: 0,
 		modelRegistry: registry,
 		authStorage: auth,
-		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
+		getSessionId: () => "test",
+		getActiveModelString: () => "anthropic/claude-opus-4-5",
+		settings: Settings.isolated(overrides as never),
 	} as unknown as ToolSession;
 	return base;
 }
@@ -41,10 +35,10 @@ const model = {
 
 function registryFor(auth: AuthStorage): ModelRegistry {
 	return {
+		authStorage: auth,
 		getAvailable: () => [model],
 		hasConfiguredAuth: () => true,
-		getProviderBaseUrl: () => model.baseUrl,
-		authStorage: auth,
+		getProviderBaseUrl: () => model.baseUrl as string,
 	} as unknown as ModelRegistry;
 }
 
@@ -54,19 +48,12 @@ const routingOverrides: Record<string, unknown> = {
 	"retry.usageReservePct": 10,
 };
 
-function expectCachedOnly(health: ReturnType<typeof vi.spyOn>): void {
-	expect(health.mock.calls.length).toBeGreaterThan(0);
-	for (const [, options] of health.mock.calls) {
-		expect(options?.cachedOnly).toBe(true);
-	}
-}
-
-describe("buildRoutingSnapshot usage attribution", () => {
+describe("buildRoutingSnapshot usage attribution (broker cache peek)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
-	it("reads persisted usage with cachedOnly and attributes a matching account", async () => {
+	it("attributes warm broker cache matching account (healthy 0.8)", async () => {
 		const auth = await AuthStorage.create(":memory:");
 		await auth.set("anthropic", {
 			type: "oauth",
@@ -83,8 +70,8 @@ describe("buildRoutingSnapshot usage attribution", () => {
 			email: identity?.email,
 			credentialKind: auth.getCredentialOrigin("anthropic")?.kind,
 		});
-		const health = vi.spyOn(auth, "getModelUsageHealth").mockResolvedValue({
-			state: "depleted",
+		const peek = vi.spyOn(auth as unknown as { peekBrokerModelUsageHealth: typeof auth.peekBrokerModelUsageHealth }, "peekBrokerModelUsageHealth").mockReturnValue({
+			state: "healthy",
 			accounts: [
 				{
 					credentialId: 1,
@@ -102,16 +89,19 @@ describe("buildRoutingSnapshot usage attribution", () => {
 				},
 			],
 		});
+		const notCalled = vi.spyOn(auth, "getModelUsageHealth");
 		const session = sessionWithRegistry(auth, registryFor(auth), routingOverrides);
 		const snapshot = await buildRoutingSnapshot(session);
-		expectCachedOnly(health);
+		expect(peek.mock.calls.length).toBeGreaterThan(0);
+		expect(notCalled).not.toHaveBeenCalled();
 		expect(snapshot.candidates).toHaveLength(1);
 		expect(snapshot.candidates[0]?.pool.accountKey).toBe(pool.accountKey);
 		expect(snapshot.candidates[0]?.usage).toBe("healthy");
 		expect(snapshot.candidates[0]?.usageRemainingFraction).toBe(0.8);
 		auth.close();
 	});
-	it("uses the sole health account as the intentional fallback when its key does not match", async () => {
+
+	it("uses the sole health account as the intentional fallback when its key does not match (warm)", async () => {
 		const auth = await AuthStorage.create(":memory:");
 		await auth.set("anthropic", {
 			type: "oauth",
@@ -120,7 +110,7 @@ describe("buildRoutingSnapshot usage attribution", () => {
 			expires: Date.now() + 60_000,
 			accountId: "candidate-account",
 		});
-		const health = vi.spyOn(auth, "getModelUsageHealth").mockResolvedValue({
+		const peek = vi.spyOn(auth as unknown as { peekBrokerModelUsageHealth: typeof auth.peekBrokerModelUsageHealth }, "peekBrokerModelUsageHealth").mockReturnValue({
 			state: "healthy",
 			accounts: [
 				{
@@ -132,16 +122,17 @@ describe("buildRoutingSnapshot usage attribution", () => {
 				},
 			],
 		});
-		const snapshot = await buildRoutingSnapshot(sessionWithRegistry(auth, registryFor(auth), routingOverrides));
-		expectCachedOnly(health);
+		const session = sessionWithRegistry(auth, registryFor(auth), routingOverrides);
+		const snapshot = await buildRoutingSnapshot(session);
+		expect(peek.mock.calls.length).toBeGreaterThan(0);
 		expect(snapshot.candidates[0]).toMatchObject({ usage: "healthy", usageRemainingFraction: 0.7 });
 		auth.close();
 	});
 
-	it("uses aggregate usage and omits remaining when two accounts miss an api-key pool", async () => {
+	it("uses aggregate usage and omits remaining when two warm accounts miss an api-key pool (ambiguous)", async () => {
 		const auth = await AuthStorage.create(":memory:");
 		await auth.set("anthropic", { type: "api_key", key: "x", source: "login" });
-		const health = vi.spyOn(auth, "getModelUsageHealth").mockResolvedValue({
+		const peek = vi.spyOn(auth as unknown as { peekBrokerModelUsageHealth: typeof auth.peekBrokerModelUsageHealth }, "peekBrokerModelUsageHealth").mockReturnValue({
 			state: "reserve",
 			accounts: [
 				{
@@ -162,20 +153,72 @@ describe("buildRoutingSnapshot usage attribution", () => {
 		});
 		const session = sessionWithRegistry(auth, registryFor(auth), routingOverrides);
 		const snapshot = await buildRoutingSnapshot(session);
-		expectCachedOnly(health);
+		expect(peek.mock.calls.length).toBeGreaterThan(0);
 		expect(snapshot.candidates[0]?.pool.accountKey).toBe("api-key");
 		expect(snapshot.candidates[0]?.usage).toBe("reserve");
 		expect(snapshot.candidates[0]?.usageRemainingFraction).toBeUndefined();
 		auth.close();
 	});
 
-	it("fails open to unknown when getModelUsageHealth throws", async () => {
+	it("resolves to unknown on cold broker cache (no warm report)", async () => {
 		const auth = await AuthStorage.create(":memory:");
-		await auth.set("anthropic", { type: "api_key", key: "x", source: "login" });
-		const health = vi.spyOn(auth, "getModelUsageHealth").mockRejectedValue(new Error("health unavailable"));
+		await auth.set("anthropic", { type: "oauth", access: "a", refresh: "r", expires: Date.now() + 60_000, accountId: "account-1" });
+		const peek = vi.spyOn(auth as unknown as { peekBrokerModelUsageHealth: typeof auth.peekBrokerModelUsageHealth }, "peekBrokerModelUsageHealth").mockReturnValue({
+			state: "unknown",
+			accounts: [{ credentialId: 1, credentialType: "oauth", accountKey: "account-1", state: "unknown" }],
+		});
 		const session = sessionWithRegistry(auth, registryFor(auth), routingOverrides);
 		const snapshot = await buildRoutingSnapshot(session);
-		expectCachedOnly(health);
+		expect(peek.mock.calls.length).toBeGreaterThan(0);
+		expect(snapshot.candidates[0]?.usage).toBe("unknown");
+		expect(snapshot.candidates[0]?.usageRemainingFraction).toBeUndefined();
+		auth.close();
+	});
+
+	it("resolves to unknown when broker cache expired (stale 15s TTL)", async () => {
+		const auth = await AuthStorage.create(":memory:");
+		await auth.set("anthropic", { type: "oauth", access: "a", refresh: "r", expires: Date.now() + 60_000, accountId: "account-1" });
+		// Simulate expired: peek returns unknown (remote peek checks 15s TTL and returns null → unknown)
+		const peek = vi.spyOn(auth as unknown as { peekBrokerModelUsageHealth: typeof auth.peekBrokerModelUsageHealth }, "peekBrokerModelUsageHealth").mockReturnValue({
+			state: "unknown",
+			accounts: [{ credentialId: 1, credentialType: "oauth", accountKey: "account-1", state: "unknown" }],
+		});
+		const session = sessionWithRegistry(auth, registryFor(auth), routingOverrides);
+		const snapshot = await buildRoutingSnapshot(session);
+		expect(peek.mock.calls.length).toBeGreaterThan(0);
+		expect(snapshot.candidates[0]?.usage).toBe("unknown");
+		expect(snapshot.candidates[0]?.usageRemainingFraction).toBeUndefined();
+		auth.close();
+	});
+
+	it("makes zero broker and provider fetches (peek only, no network)", async () => {
+		const auth = await AuthStorage.create(":memory:");
+		await auth.set("anthropic", { type: "oauth", access: "a", refresh: "r", expires: Date.now() + 60_000, accountId: "account-1" });
+		// Underline: peek path never touches usage providers; getModelUsageHealth must not be called
+		const peek = vi.spyOn(auth as unknown as { peekBrokerModelUsageHealth: typeof auth.peekBrokerModelUsageHealth }, "peekBrokerModelUsageHealth").mockReturnValue({
+			state: "healthy",
+			accounts: [{ credentialId: 1, credentialType: "oauth", accountKey: "account-1", state: "healthy", remainingFraction: 0.6 }],
+		});
+		const fetchSpy = vi.spyOn(auth, "fetchUsageReports" as never);
+		const healthSpy = vi.spyOn(auth, "getModelUsageHealth");
+		const session = sessionWithRegistry(auth, registryFor(auth), routingOverrides);
+		await buildRoutingSnapshot(session);
+		await buildRoutingSnapshot(session);
+		expect(peek.mock.calls.length).toBeGreaterThan(0);
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(healthSpy).not.toHaveBeenCalled();
+		auth.close();
+	});
+
+	it("fails open to unknown when peek throws", async () => {
+		const auth = await AuthStorage.create(":memory:");
+		await auth.set("anthropic", { type: "api_key", key: "x", source: "login" });
+		const peek = vi.spyOn(auth as unknown as { peekBrokerModelUsageHealth: typeof auth.peekBrokerModelUsageHealth }, "peekBrokerModelUsageHealth").mockImplementation(() => {
+			throw new Error("health unavailable");
+		});
+		const session = sessionWithRegistry(auth, registryFor(auth), routingOverrides);
+		const snapshot = await buildRoutingSnapshot(session);
+		expect(peek.mock.calls.length).toBeGreaterThan(0);
 		expect(snapshot.candidates[0]?.usage).toBe("unknown");
 		expect(snapshot.candidates[0]?.usageRemainingFraction).toBeUndefined();
 		auth.close();

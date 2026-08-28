@@ -521,6 +521,15 @@ export interface AuthCredentialStore {
 	 */
 	getUsageReport?(provider: Provider, credential: OAuthCredential, signal?: AbortSignal): Promise<UsageReport | null>;
 	/**
+	 * Passive peek at a broker's in-memory usage cache — never fetches.
+	 * RemoteAuthCredentialStore returns the last warm+fresh aggregate `/v1/usage`
+	 * response (15s TTL) or `null` for cold/expired; local stores omit it.
+	 * Routing uses this so candidate ranking never blocks on provider probes.
+	 */
+	peekCachedUsageReport?(provider: Provider, credential: OAuthCredential): UsageReport | null;
+	/** Passive aggregate peek counterpart; `null` means cold or expired. */
+	peekCachedUsageReports?(): UsageReport[] | null;
+	/**
 	 * Optional store hook to ingest a parsed provider usage report for one OAuth
 	 * credential. Remote broker stores use this to overlay header-derived limits
 	 * onto their cached aggregate `/v1/usage` response without mutating broker
@@ -4181,6 +4190,138 @@ export class AuthStorage {
 		if (accounts.some(account => account.state === "reserve")) return { state: "reserve", accounts };
 		return { state: "depleted", accounts };
 	}
+	/**
+	 * Passive routing health: reads only the broker's in-memory usage cache.
+	 * Warm + fresh (RemoteAuthCredentialStore 15s TTL, overlay-aware) may
+	 * populate `healthy`/`reserve`/`depleted` with `remainingFraction`; cold or
+	 * expired is `unknown`. Never calls `AuthBrokerClient.fetchUsage` or any
+	 * provider quota endpoint — zero network. Generic callers (status-line,
+	 * `/usage`, turn-recovery) keep using {@link getModelUsageHealth}.
+	 */
+	peekBrokerModelUsageHealth(provider: Provider, options: ModelUsageHealthOptions): ModelUsageHealth {
+		const origin = this.getCredentialOrigin(provider);
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		if (!origin || !strategy || (origin.kind !== "oauth" && origin.kind !== "api_key")) {
+			return { state: "unknown", accounts: [] };
+		}
+		const stored = this.#getStoredCredentials(provider).map((entry, index) => ({ entry, index }));
+		const oauthPool = stored.filter(({ entry }) => entry.credential.type === "oauth");
+		const apiKeyPool = stored.filter(({ entry }) => entry.credential.type === "api_key");
+		const loginApiKeyPool = apiKeyPool.filter(
+			({ entry }) => entry.credential.type === "api_key" && entry.credential.source === "login",
+		);
+		const pool = origin.kind === "oauth" ? oauthPool : loginApiKeyPool;
+		if (pool.length === 0) return { state: "unknown", accounts: [] };
+		const sessionCredential = this.#getSessionCredential(provider, options.sessionId);
+		const selectedCredentialId =
+			sessionCredential?.type === origin.kind
+				? this.#getStoredCredentials(provider)[sessionCredential.index]?.id
+				: undefined;
+		const rankingContext: CredentialRankingContext = { modelId: options.modelId };
+		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options.modelId);
+		const planEligibilityByCredential = new Map<number, boolean | undefined>();
+		const blockScope = strategy.blockScope?.(rankingContext);
+		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const reserveFraction = Number.isFinite(options.reserveFraction)
+			? Math.max(0, Math.min(1, options.reserveFraction))
+			: 0;
+		const nowMs = Date.now();
+		const peekReport = (this.#store as unknown as { peekCachedUsageReport?: (p: Provider, c: OAuthCredential) => UsageReport | null })
+			.peekCachedUsageReport?.bind(this.#store);
+		let accounts: ModelUsageAccountHealth[] = pool.map(({ entry, index }) => {
+			const credentialType = entry.credential.type;
+			const oauthCredential = entry.credential.type === "oauth" ? entry.credential : undefined;
+			const accountKey =
+				oauthCredential?.accountId?.trim().toLowerCase() ||
+				oauthCredential?.email?.trim().toLowerCase() ||
+				undefined;
+			const providerKey = this.#getProviderTypeKey(provider, credentialType);
+			let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
+			if (blockedUntil !== undefined && provider !== "openai-codex") {
+				return {
+					credentialId: entry.id,
+					credentialType,
+					accountKey,
+					state: "depleted" as const,
+					resetsAt: blockedUntil,
+				};
+			}
+			let report: UsageReport | null = null;
+			if (entry.credential.type === "oauth" && peekReport) {
+				try {
+					report = peekReport(provider, entry.credential);
+				} catch {
+					report = null;
+				}
+			}
+			if (planRequirement !== "none") {
+				planEligibilityByCredential.set(entry.id, getOpenAICodexPlanEligibility(report, planRequirement));
+			}
+			if (provider === "openai-codex") {
+				blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
+			}
+			if (blockedUntil !== undefined) {
+				return {
+					credentialId: entry.id,
+					credentialType,
+					accountKey,
+					state: "depleted" as const,
+					resetsAt: blockedUntil,
+				};
+			}
+			if (!report) return { credentialId: entry.id, credentialType, accountKey, state: "unknown" as const };
+			const limits =
+				strategy.scopeLimitsForReserve?.(report, rankingContext) ??
+				this.#getScopedUsageLimits(strategy, report, rankingContext);
+			if (limits.length === 0) return { credentialId: entry.id, credentialType, accountKey, state: "unknown" as const };
+			const currentLimits = limits.filter(limit => {
+				const resetsAt = limit.window?.resetsAt;
+				return resetsAt === undefined || resetsAt > nowMs || report!.fetchedAt >= resetsAt;
+			});
+			if (currentLimits.length === 0) {
+				return { credentialId: entry.id, credentialType, accountKey, state: "unknown" as const };
+			}
+			const activeExhausted = currentLimits.filter(limit => this.#isUsageLimitExhausted(limit));
+			if (activeExhausted.length > 0) {
+				const futureResets = activeExhausted
+					.map(limit => limit.window?.resetsAt)
+					.filter((resetsAt): resetsAt is number => resetsAt !== undefined && resetsAt > nowMs);
+				return {
+					credentialId: entry.id,
+					credentialType,
+					accountKey,
+					state: "depleted" as const,
+					resetsAt: futureResets.length > 0 ? Math.min(...futureResets) : undefined,
+				};
+			}
+			const usedFractions = currentLimits
+				.map(resolveUsedFraction)
+				.filter((fraction): fraction is number => fraction !== undefined);
+			if (usedFractions.length === 0) {
+				return { credentialId: entry.id, credentialType, accountKey, state: "unknown" as const };
+			}
+			const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
+			return {
+				credentialId: entry.id,
+				credentialType,
+				accountKey,
+				state: remainingFraction <= reserveFraction ? ("reserve" as const) : ("healthy" as const),
+				remainingFraction,
+			};
+		});
+		if (planRequirement !== "none") {
+			accounts = accounts.filter(account => planEligibilityByCredential.get(account.credentialId) !== false);
+		}
+		if (selectedCredentialId !== undefined) {
+			const selectedAccount = accounts.find(account => account.credentialId === selectedCredentialId);
+			if (selectedAccount) selectedAccount.selected = true;
+		}
+		if (accounts.some(account => account.state === "healthy")) return { state: "healthy", accounts };
+		if (accounts.some(account => account.state === "unknown")) return { state: "unknown", accounts };
+		if (accounts.some(account => account.state === "reserve")) return { state: "reserve", accounts };
+		return { state: "depleted", accounts };
+	}
+
 
 	/**
 	 * Release a session's sticky credential so its next {@link getApiKey} call

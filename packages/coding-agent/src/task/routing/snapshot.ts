@@ -60,10 +60,11 @@ export function resolveParentPoolIdentity(session: ToolSession): ResourcePoolIde
 
 /**
  * Build routing candidate inputs from the live model registry without provider
- * quota fetches. The hot path is fetch-free: it reads persisted usage only via
- * AuthStorage.getModelUsageHealth(..., { cachedOnly: true }) with a TTL
- * freshness bound. A cold, stale, or unattributable read resolves to
- * `unknown` and never blocks task preflight.
+ * quota or broker fetches. The routing hot path is strictly passive: it peeks
+ * only the broker's in-memory usage cache (RemoteAuthCredentialStore 15s TTL,
+ * overlay-aware) via AuthStorage.peekBrokerModelUsageHealth. Warm+fresh
+ * cached reports may populate `usage`/`usageRemainingFraction`; cold or
+ * expired resolves to `unknown` and never calls AuthBrokerClient.fetchUsage.
  */
 export async function buildRoutingSnapshot(
 	session: ToolSession,
@@ -135,12 +136,11 @@ export async function buildRoutingSnapshot(
 			let state: RoutingUsageState = "unknown";
 			let remainingFraction: number | undefined;
 			try {
-				const health = await authStorage.getModelUsageHealth(model.provider, {
+				const health = authStorage.peekBrokerModelUsageHealth(model.provider, {
 					modelId: model.id,
 					sessionId,
 					baseUrl,
 					reserveFraction,
-					cachedOnly: true,
 				});
 				const matched = health.accounts.filter(a => a.accountKey !== undefined && a.accountKey === pool.accountKey);
 				const attributed =
