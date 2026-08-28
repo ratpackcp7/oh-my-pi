@@ -107,7 +107,11 @@ describe("director preference: role vs cli", () => {
 			"task.routing.excludePools": [],
 			"task.routing.preferPools": [],
 			"task.routing.agentModels": {
-				scout: ["google-antigravity/gemini-3.7-flash", "meta/muse-spark-1.2-contributor", "cursor/composer-2.5"],
+				scout: [
+					"google-antigravity/gemini-3.7-flash",
+					"meta/muse-spark-1.2-contributor",
+					"google-gemini-cli/gemini-3.5-flash",
+				],
 			},
 		});
 		const models = [
@@ -132,14 +136,14 @@ describe("director preference: role vs cli", () => {
 				baseUrl: "https://meta.example",
 			},
 			{
-				provider: "cursor",
-				id: "composer-2.5",
+				provider: "google-gemini-cli",
+				id: "gemini-3.5-flash",
 				input: ["text"],
 				supportsTools: true,
-				contextWindow: 200_000,
-				cost: { input: 0.2, output: 0.2 },
+				contextWindow: 1_000_000,
+				cost: { input: 0.1, output: 0.1 },
 				reasoning: true,
-				baseUrl: "https://cursor.example",
+				baseUrl: "https://gemini-cli.example",
 			},
 		];
 		const authStorage = {
@@ -187,7 +191,7 @@ describe("director preference: role vs cli", () => {
 			const allowed = new Set([
 				"google-antigravity/gemini-3.7-flash",
 				"meta/muse-spark-1.2-contributor",
-				"cursor/composer-2.5",
+				"google-gemini-cli/gemini-3.5-flash",
 			]);
 			expect(planned.every(model => model !== undefined && allowed.has(model))).toBe(true);
 			expect(new Set(planned).size).toBe(3);

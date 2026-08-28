@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Cheap / Sonic worker routing now stays inside the fast (`@smol`) class: a high-headroom premium model can no longer win a non-pinned cheap dispatch.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added

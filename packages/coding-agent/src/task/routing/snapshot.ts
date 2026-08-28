@@ -22,6 +22,22 @@ const CONCRETE_PRIORITY_ROSTER: readonly string[] = [
 ];
 
 /**
+ * Cheap/fast class: bundled smol priority chain plus the configured `modelRoles.smol`
+ * selector so a custom fast-role assignment stays eligible. Does not use `@smol`
+ * expansion, which can inherit `default` and would admit premium models.
+ */
+function cheapEligibilityPatterns(settings: Settings): string[] {
+	const configured = settings.getModelRole("smol")?.trim();
+	const extra = configured
+		? configured
+				.split(",")
+				.map(pattern => pattern.trim())
+				.filter(Boolean)
+		: [];
+	return [...extra, ...MODEL_PRIORITY.smol];
+}
+
+/**
  * Resource pool for one provider as this session would reach it: provider +
  * configured base URL + the active account identity. Used for the parent pool
  * and for reporting the pool an explicit model pin lands in.
@@ -110,6 +126,14 @@ export async function buildRoutingSnapshot(
 		filtered.push(model);
 	}
 
+	const cheapSelectors = new Set(
+		filterAvailableModelsByEnabledPatterns(
+			filtered,
+			cheapEligibilityPatterns(session.settings),
+			session.settings,
+		).map(model => `${model.provider}/${model.id}`),
+	);
+
 	const reserveFraction = session.settings.get("retry.usageReservePct") / 100;
 	const healthByKey = new Map<string, { state: RoutingUsageState; remainingFraction?: number }>();
 	const candidates: RoutingCandidateInput[] = [];
@@ -168,6 +192,7 @@ export async function buildRoutingSnapshot(
 			contextWindow: model.contextWindow ?? null,
 			costPerMTokenTotal: model.cost ? (model.cost.input ?? 0) + (model.cost.output ?? 0) : 0,
 			reasoning: Boolean(model.reasoning),
+			cheap: cheapSelectors.has(selector),
 			usage: healthState,
 			usageRemainingFraction: healthRemainingFraction,
 			preferredRank: rankBySelector.get(selector),
