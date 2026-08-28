@@ -1135,7 +1135,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return overlay ?? null;
 	}
 
-
 	/**
 	 * Hot path — called per `getUsageReport()`/`fetchUsageReports()` (status-line
 	 * refresh cadence). The oauth-credential lookup is memoized on `#snapshot`

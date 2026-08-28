@@ -4226,8 +4226,9 @@ export class AuthStorage {
 			? Math.max(0, Math.min(1, options.reserveFraction))
 			: 0;
 		const nowMs = Date.now();
-		const peekReport = (this.#store as unknown as { peekCachedUsageReport?: (p: Provider, c: OAuthCredential) => UsageReport | null })
-			.peekCachedUsageReport?.bind(this.#store);
+		const peekReport = (
+			this.#store as unknown as { peekCachedUsageReport?: (p: Provider, c: OAuthCredential) => UsageReport | null }
+		).peekCachedUsageReport?.bind(this.#store);
 		let accounts: ModelUsageAccountHealth[] = pool.map(({ entry, index }) => {
 			const credentialType = entry.credential.type;
 			const oauthCredential = entry.credential.type === "oauth" ? entry.credential : undefined;
@@ -4273,7 +4274,8 @@ export class AuthStorage {
 			const limits =
 				strategy.scopeLimitsForReserve?.(report, rankingContext) ??
 				this.#getScopedUsageLimits(strategy, report, rankingContext);
-			if (limits.length === 0) return { credentialId: entry.id, credentialType, accountKey, state: "unknown" as const };
+			if (limits.length === 0)
+				return { credentialId: entry.id, credentialType, accountKey, state: "unknown" as const };
 			const currentLimits = limits.filter(limit => {
 				const resetsAt = limit.window?.resetsAt;
 				return resetsAt === undefined || resetsAt > nowMs || report!.fetchedAt >= resetsAt;
@@ -4321,7 +4323,6 @@ export class AuthStorage {
 		if (accounts.some(account => account.state === "reserve")) return { state: "reserve", accounts };
 		return { state: "depleted", accounts };
 	}
-
 
 	/**
 	 * Release a session's sticky credential so its next {@link getApiKey} call
