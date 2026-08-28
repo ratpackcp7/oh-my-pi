@@ -53,6 +53,7 @@ function candidate(selector: string, identity: ResourcePoolIdentity, extra: Part
 		costPerMTokenTotal: 3,
 		reasoning: true,
 		usage: "healthy",
+		cheap: true,
 		...extra,
 	} satisfies RoutingCandidateInput;
 }
@@ -222,6 +223,32 @@ describe("task routing integration", () => {
 		expect(execution.result.resourcePool).toBe("cursor");
 		expect(execution.result.routingAntiAffinity).toBe(true);
 		expect(execution.result.routingReason).toContain("cursor");
+	});
+
+	it("cheap intent cannot select a non-cheap snapshot candidate even with perfect headroom", async () => {
+		mockDiscovery();
+		mockSnapshot([
+			candidate("cursor/cursor-grok-4.6", pool("cursor"), {
+				cheap: false,
+				usageRemainingFraction: 1,
+				preferredRank: 0,
+				costPerMTokenTotal: 80,
+			}),
+			candidate("google-antigravity/gemini-3.1-flash-lite", pool("google-antigravity"), {
+				cheap: true,
+				usage: "unknown",
+				costPerMTokenTotal: 0.2,
+			}),
+			candidate("anthropic/claude-sonnet-4-5", PARENT_POOL, { cheap: false, costPerMTokenTotal: 1 }),
+		]);
+		const policy = await resolveEffectiveSubagentPolicy({
+			session: session({ "task.routing.agentIntents": { scout: "cheap" }, "task.routing.preferPools": ["cursor"] }),
+			invocationKind: "task",
+			assignment: "cheap recon",
+			agent: "scout",
+		});
+		expect(policy.modelOverride?.[0]).toBe("google-antigravity/gemini-3.1-flash-lite");
+		expect(policy.routingBypassReason).toBeUndefined();
 	});
 
 	it("F9 an explicit per-invocation pin wins even inside the parent pool and records the override", async () => {

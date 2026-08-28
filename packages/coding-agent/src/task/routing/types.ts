@@ -25,6 +25,13 @@ export type RoutingCandidateInput = {
 	 * Undefined whenever attribution is ambiguous — never a cross-account maximum.
 	 */
 	usageRemainingFraction?: number;
+	/**
+	 * Whether this candidate is in the cheap/fast class (`@smol` / `modelRoles.smol`
+	 * plus the bundled smol priority chain). Cheap intent hard-filters to this set
+	 * before scoring. Snapshot always sets it; omitted means not cheap.
+	 * Explicit per-invocation pins never reach this field — they bypass `routeWorker`.
+	 */
+	cheap?: boolean;
 	preferredRank?: number;
 };
 

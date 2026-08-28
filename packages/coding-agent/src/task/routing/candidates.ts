@@ -105,6 +105,16 @@ export function filterRoutingCandidates(request: RoutingRequest): {
 		}
 	}
 
+	// "cheap" is a class boundary, not a preference. Candidates outside the
+	// cheap/fast (@smol) class leave the viable set so headroom/rank/pool
+	// bonuses cannot promote a premium model. Explicit pins never reach this
+	// gate — they bypass routeWorker. An empty cheap set fails closed.
+	if (request.intent === "cheap") {
+		const beforeCheap = viable.length;
+		viable = viable.filter(candidate => candidate.cheap === true);
+		trace.push(`cheap eligibility removed ${beforeCheap - viable.length} candidate(s)`);
+	}
+
 	trace.push(
 		`intent=${request.intent} vision=${String(effectiveVision)} minContext=${String(effectiveMinContext ?? "none")} structured=${String(effectiveStructured)}`,
 	);
