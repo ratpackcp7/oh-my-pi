@@ -5,7 +5,7 @@ import MODEL_PRIORITY from "../../priority.json" with { type: "json" };
 import type { ToolSession } from "../../tools";
 import type { TaskRoutingOptions } from "../types";
 import { resolveResourcePool } from "./pool";
-import type { ResourcePoolIdentity, RoutingCandidateInput, RoutingPolicy } from "./types";
+import type { ResourcePoolIdentity, RoutingCandidateInput, RoutingPolicy, RoutingUsageState } from "./types";
 
 /** Intentional worker pattern: must be a concrete provider-qualified selector. Bare aliases like `flash`, `mini`, `pro` are not intentional. */
 function isConcreteWorkerPattern(pattern: string): boolean {
@@ -60,10 +60,11 @@ export function resolveParentPoolIdentity(session: ToolSession): ResourcePoolIde
 
 /**
  * Build routing candidate inputs from the live model registry without provider
- * I/O. The dispatch hot path is intentionally cache/network agnostic: usage is
- * "unknown" until a dedicated cache-only health API exists. Calling
- * AuthStorage.getModelUsageHealth() here is unsafe because a cold usage cache
- * can fetch provider quota endpoints and block task preflight.
+ * quota or broker fetches. The routing hot path is strictly passive: it peeks
+ * only the broker's in-memory usage cache (RemoteAuthCredentialStore 15s TTL,
+ * overlay-aware) via AuthStorage.peekBrokerModelUsageHealth. Warm+fresh
+ * cached reports may populate `usage`/`usageRemainingFraction`; cold or
+ * expired resolves to `unknown` and never calls AuthBrokerClient.fetchUsage.
  */
 export async function buildRoutingSnapshot(
 	session: ToolSession,
@@ -109,6 +110,8 @@ export async function buildRoutingSnapshot(
 		filtered.push(model);
 	}
 
+	const reserveFraction = session.settings.get("retry.usageReservePct") / 100;
+	const healthByKey = new Map<string, { state: RoutingUsageState; remainingFraction?: number }>();
 	const candidates: RoutingCandidateInput[] = [];
 	for (const model of filtered) {
 		const baseUrl = modelRegistry.getProviderBaseUrl(model.provider) ?? (model.baseUrl as string | undefined);
@@ -122,6 +125,41 @@ export async function buildRoutingSnapshot(
 			credentialKind: origin?.kind,
 		});
 		const selector = `${model.provider}/${model.id}`;
+		const healthKey = `${model.provider}\u0000${model.id}\u0000${baseUrl ?? ""}`;
+		let healthState: RoutingUsageState;
+		let healthRemainingFraction: number | undefined;
+		const cached = healthByKey.get(healthKey);
+		if (cached) {
+			healthState = cached.state;
+			healthRemainingFraction = cached.remainingFraction;
+		} else {
+			let state: RoutingUsageState = "unknown";
+			let remainingFraction: number | undefined;
+			try {
+				const health = authStorage.peekBrokerModelUsageHealth(model.provider, {
+					modelId: model.id,
+					sessionId,
+					baseUrl,
+					reserveFraction,
+				});
+				const matched = health.accounts.filter(a => a.accountKey !== undefined && a.accountKey === pool.accountKey);
+				const attributed =
+					matched.length === 1 ? matched[0] : health.accounts.length === 1 ? health.accounts[0] : undefined;
+				if (attributed) {
+					state = attributed.state as RoutingUsageState;
+					remainingFraction = attributed.remainingFraction;
+				} else {
+					state = health.state as RoutingUsageState;
+					remainingFraction = undefined;
+				}
+			} catch {
+				state = "unknown";
+				remainingFraction = undefined;
+			}
+			healthByKey.set(healthKey, { state, remainingFraction });
+			healthState = state;
+			healthRemainingFraction = remainingFraction;
+		}
 		candidates.push({
 			selector,
 			pool,
@@ -130,7 +168,8 @@ export async function buildRoutingSnapshot(
 			contextWindow: model.contextWindow ?? null,
 			costPerMTokenTotal: model.cost ? (model.cost.input ?? 0) + (model.cost.output ?? 0) : 0,
 			reasoning: Boolean(model.reasoning),
-			usage: "unknown",
+			usage: healthState,
+			usageRemainingFraction: healthRemainingFraction,
 			preferredRank: rankBySelector.get(selector),
 		});
 	}

@@ -1097,6 +1097,43 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		if (matched && overlay) return mergeUsageReports(matched, overlay);
 		return overlay ?? matched;
 	}
+	/**
+	 * Passive peek at the broker's in-memory usage cache — never fetches.
+	 * Returns the last aggregate `/v1/usage` response when it is warm and
+	 * fresh (15s TTL), otherwise `null` (cold or expired). Overlays and
+	 * account-pool filtering are applied, but `AuthBrokerClient.fetchUsage`
+	 * is never invoked. Routing uses this so an Opus parent never blocks on a
+	 * quota probe.
+	 */
+	peekCachedUsageReports(): UsageReport[] | null {
+		const cached = this.#usageCache;
+		if (!cached) return null;
+		if (Date.now() - cached.fetchedAt >= USAGE_CACHE_TTL_MS) return null;
+		if (cached.reports === null) return null;
+		return this.#filterUsageReports(this.#applyUsageOverlays(cached.reports));
+	}
+
+	/**
+	 * Passive per-credential peek — never fetches. The routing hot path
+	 * attributes a single pool's headroom from a cached report whose identity
+	 * (accountId/email) matches the candidate pool. Cold or expired resolves
+	 * to `null` so the candidate stays `unknown`.
+	 */
+	peekCachedUsageReport(provider: Provider, credential: OAuthCredential): UsageReport | null {
+		const cached = this.#usageCache;
+		if (cached && Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS && cached.reports !== null) {
+			const reports = this.#filterUsageReports(this.#applyUsageOverlays(cached.reports));
+			const matched = matchUsageReport(reports, provider, credential);
+			const overlay = this.#getActiveUsageOverlay(provider, credential);
+			if (matched && overlay) return mergeUsageReports(matched, overlay);
+			if (matched) return matched;
+			if (overlay) return overlay;
+			return null;
+		}
+		// No fresh aggregate — an overlay alone may still warm the credential.
+		const overlay = this.#getActiveUsageOverlay(provider, credential);
+		return overlay ?? null;
+	}
 
 	/**
 	 * Hot path — called per `getUsageReport()`/`fetchUsageReports()` (status-line

@@ -1,5 +1,5 @@
 import { filterRoutingCandidates } from "./candidates";
-import { scoreRoutingCandidate, selectRoutingCandidate } from "./select";
+import { scoreRoutingCandidate, selectRoutingCandidate, usageScoreComponent } from "./select";
 import type { RoutingOutcome, RoutingRequest } from "./types";
 
 export function routeWorker(request: RoutingRequest): RoutingOutcome {
@@ -72,10 +72,7 @@ export function routeWorker(request: RoutingRequest): RoutingOutcome {
 		// check if scoring usage bonus changed outcome vs ignoring usage
 		const withoutUsageScores = deduped.map(c => {
 			const withScore = scoreRoutingCandidate(c, request);
-			let usageBonus = 0;
-			if (c.usage === "healthy") usageBonus = 30;
-			else if (c.usage === "unknown") usageBonus = 10;
-			else if (c.usage === "reserve") usageBonus = -40;
+			const usageBonus = usageScoreComponent(c);
 			return { candidate: c, scoreWithout: withScore - usageBonus };
 		});
 		withoutUsageScores.sort((a, b) => b.scoreWithout - a.scoreWithout);
@@ -117,18 +114,22 @@ export function routeWorker(request: RoutingRequest): RoutingOutcome {
 
 	// reason: ONE concise line for normal UI
 	const poolLabel = chosen.pool.label;
+	const headroomText =
+		chosen.usageRemainingFraction === undefined
+			? chosen.usage
+			: `${chosen.usage} ${Math.round(chosen.usageRemainingFraction * 100)}% left`;
 	let reason: string;
 	if (parentPoolFallback) {
-		reason = `${chosen.selector} (${poolLabel} pool; parent pool fallback exception; headroom ${chosen.usage})`;
+		reason = `${chosen.selector} (${poolLabel} pool; parent pool fallback exception; headroom ${headroomText})`;
 	} else if (filtered.antiAffinityApplied) {
 		const parentLabel = parentPool?.provider ?? "parent";
-		reason = `${chosen.selector} (${poolLabel} pool; parent pool ${parentLabel} excluded; headroom ${chosen.usage})`;
+		reason = `${chosen.selector} (${poolLabel} pool; parent pool ${parentLabel} excluded; headroom ${headroomText})`;
 	} else {
-		reason = `${chosen.selector} (${poolLabel} pool; headroom ${chosen.usage})`;
+		reason = `${chosen.selector} (${poolLabel} pool; headroom ${headroomText})`;
 	}
 
 	trace.push(
-		`chosen ${chosen.selector} pool=${poolLabel} score=${String(scoreRoutingCandidate(chosen, request))} antiAffinity=${String(filtered.antiAffinityApplied)} fallback=${String(parentPoolFallback)}`,
+		`chosen ${chosen.selector} pool=${poolLabel} score=${String(scoreRoutingCandidate(chosen, request))} antiAffinity=${String(filtered.antiAffinityApplied)} fallback=${String(parentPoolFallback)} usage=${chosen.usage} remaining=${chosen.usageRemainingFraction === undefined ? "n/a" : chosen.usageRemainingFraction.toFixed(2)}`,
 	);
 
 	return {

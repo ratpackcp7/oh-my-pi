@@ -38,13 +38,13 @@ function makeStore(rows: StoredAuthCredential[], blocked = new Map<number, numbe
 	};
 }
 
-function oauthRow(id: number): StoredAuthCredential {
+function oauthRow(id: number, accountId = `account-${id}`): StoredAuthCredential {
 	const credential: AuthCredential = {
 		type: "oauth",
 		access: `access-${id}`,
 		refresh: `refresh-${id}`,
 		expires: Date.now() + 60 * 60_000,
-		accountId: `account-${id}`,
+		accountId,
 	};
 	return { id, provider: "anthropic", credential, disabledCause: null };
 }
@@ -87,10 +87,11 @@ const strategy: CredentialRankingStrategy = {
 	windowDefaults: { primaryMs: 60_000, secondaryMs: 60_000 },
 };
 
-function makeUsageProvider(reports: Record<string, UsageReport | null>): UsageProvider {
+function makeUsageProvider(reports: Record<string, UsageReport | null>, calls?: { count: number }): UsageProvider {
 	return {
 		id: "anthropic",
 		fetchUsage: async params => {
+			if (calls) calls.count += 1;
 			const account = params.credential.accountId ?? params.credential.apiKey;
 			return account ? (reports[account] ?? null) : null;
 		},
@@ -108,9 +109,10 @@ describe("AuthStorage model usage health", () => {
 		rows: StoredAuthCredential[],
 		reports: Record<string, UsageReport | null>,
 		blocked?: Map<number, number>,
+		calls?: { count: number },
 	): Promise<AuthStorage> {
 		const storage = new AuthStorage(makeStore(rows, blocked), {
-			usageProviderResolver: provider => (provider === "anthropic" ? makeUsageProvider(reports) : undefined),
+			usageProviderResolver: provider => (provider === "anthropic" ? makeUsageProvider(reports, calls) : undefined),
 			rankingStrategyResolver: provider => (provider === "anthropic" ? strategy : undefined),
 			configValueResolver: async value => value,
 		});
@@ -396,6 +398,140 @@ describe("AuthStorage model usage health", () => {
 		controller.abort();
 		await expect(health).rejects.toThrow("usage fetch aborted");
 		pending.resolve(report("key-1", [limit("short", 0.2)]));
+	});
+
+	it("returns unknown from a cold cachedOnly lookup without fetching", async () => {
+		const calls = { count: 0 };
+		const storage = await createStorage(
+			[oauthRow(1)],
+			{ "account-1": report("account-1", [limit("short", 0.4)]) },
+			undefined,
+			calls,
+		);
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("unknown");
+		expect(health.accounts.map(account => account.state)).toEqual(["unknown"]);
+		expect(calls.count).toBe(0);
+	});
+
+	it("serves a warm cachedOnly lookup without fetching and reports remaining headroom", async () => {
+		const calls = { count: 0 };
+		const storage = await createStorage(
+			[oauthRow(1)],
+			{ "account-1": report("account-1", [limit("short", 0.4)]) },
+			undefined,
+			calls,
+		);
+		await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+		});
+		expect(calls.count).toBe(1);
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(calls.count).toBe(1);
+		expect(health.state).toBe("healthy");
+		expect(health.accounts[0]?.state).toBe("healthy");
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.6);
+	});
+
+	it("classifies cachedOnly reserve when remaining headroom is at the threshold", async () => {
+		const calls = { count: 0 };
+		const storage = await createStorage(
+			[oauthRow(1)],
+			{ "account-1": report("account-1", [limit("short", 0.95)]) },
+			undefined,
+			calls,
+		);
+		await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+		});
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(calls.count).toBe(1);
+		expect(health.state).toBe("reserve");
+		expect(health.accounts[0]?.state).toBe("reserve");
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.05);
+	});
+
+	it("classifies cachedOnly exhaustion as depleted without refetching", async () => {
+		const calls = { count: 0 };
+		const storage = await createStorage(
+			[oauthRow(1)],
+			{ "account-1": report("account-1", [limit("short", 1)]) },
+			undefined,
+			calls,
+		);
+		await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+		});
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(calls.count).toBe(1);
+		expect(health.state).toBe("depleted");
+		expect(health.accounts[0]?.state).toBe("depleted");
+	});
+
+	it("treats cachedOnly reports older than the five-minute TTL as unknown without fetching", async () => {
+		const calls = { count: 0 };
+		const stale = report("account-1", [limit("short", 0.4)]);
+		stale.fetchedAt = Date.now() - 6 * 60_000;
+		const storage = await createStorage([oauthRow(1)], { "account-1": stale }, undefined, calls);
+		await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+		});
+		expect(calls.count).toBe(1);
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(calls.count).toBe(1);
+		expect(health.state).toBe("unknown");
+		expect(health.accounts[0]?.state).toBe("unknown");
+	});
+
+	it("returns distinct lowercased accountKey values and remainingFraction per OAuth account", async () => {
+		const calls = { count: 0 };
+		const storage = await createStorage(
+			[oauthRow(1, "Account-1"), oauthRow(2, "Account-2")],
+			{
+				"Account-1": report("Account-1", [limit("short", 0.4)]),
+				"Account-2": report("Account-2", [limit("short", 0.1)]),
+			},
+			undefined,
+			calls,
+		);
+		await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+		});
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(calls.count).toBe(2);
+		expect(health.state).toBe("healthy");
+		expect(health.accounts.map(account => account.accountKey)).toEqual(["account-1", "account-2"]);
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.6);
+		expect(health.accounts[1]?.remainingFraction).toBeCloseTo(0.9);
 	});
 });
 
