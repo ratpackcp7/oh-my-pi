@@ -31,7 +31,12 @@ import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "..
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { routeWorker } from "../task/routing/router";
-import { buildRoutingSnapshot, getRoutingPolicyFromSettings } from "../task/routing/snapshot";
+import {
+	buildRoutingSnapshot,
+	getRoutingPolicyFromSettings,
+	resolveProviderPool,
+	selectorProvider,
+} from "../task/routing/snapshot";
 import type { RoutingIntent, RoutingRequirements } from "../task/routing/types";
 import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
 import type { ToolSession } from "../tools";
@@ -145,6 +150,8 @@ interface VibeRestoreCandidate {
 interface ResolvedVibeWorker {
 	agent: AgentDefinition;
 	modelOverride?: string | string[];
+	/** Pool selected for the planned model; used to diversify concurrent Vibe siblings. */
+	routingPoolKey?: string;
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
 	role?: VibeRole;
@@ -173,6 +180,8 @@ interface VibeRecord {
 	childSessionFile?: string;
 	agent: AgentDefinition;
 	modelOverride?: string | string[];
+	/** Planned resource pool for this worker while its current turn is in flight. */
+	routingPoolKey?: string;
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
 	intent?: VibeRoutingIntent;
@@ -473,6 +482,7 @@ export class VibeSessionRegistry {
 			intent?: VibeRoutingIntent;
 			routing?: VibeRoutingOptions;
 			metadata?: VibeExternalMetadata;
+			siblingPools?: readonly string[];
 		},
 	): Promise<ResolvedVibeWorker> {
 		const agentName = VIBE_ROLE_AGENT[role];
@@ -516,9 +526,14 @@ export class VibeSessionRegistry {
 						throw new ToolError(`PIN_UNAVAILABLE: selector "${pin}" not present in the verified model registry`);
 				}
 			}
+			const pinnedProvider = selectorProvider(trimmed[0]);
+			const pinnedPool = pinnedProvider
+				? resolveProviderPool(session as unknown as ToolSession, pinnedProvider)
+				: undefined;
 			return {
 				agent,
 				modelOverride: trimmed,
+				routingPoolKey: pinnedPool?.key,
 				modelRole: undefined,
 				role,
 				intent: options.intent,
@@ -586,7 +601,7 @@ export class VibeSessionRegistry {
 				intent: routingIntent as unknown as RoutingIntent,
 				requirements: {} as RoutingRequirements,
 				parentPool,
-				siblingPools: undefined as unknown as string[] | undefined,
+				siblingPools: options.siblingPools,
 				deadSelectors: options.routing?.deadSelectors,
 				policy,
 				candidates,
@@ -611,6 +626,7 @@ export class VibeSessionRegistry {
 			return {
 				agent,
 				modelOverride: outcome.selectors,
+				routingPoolKey: outcome.pool.key,
 				modelRole,
 				role,
 				intent: routingIntent,
@@ -763,6 +779,15 @@ export class VibeSessionRegistry {
 		if (ref?.kind !== "sub" || ref.parentId !== record.ownerId) return undefined;
 		if (record.childSessionFile && ref.sessionFile !== record.childSessionFile) return undefined;
 		return ref;
+	}
+
+	#inFlightSiblingPools(scope: VibeOwnerScope): string[] {
+		const pools = new Set<string>();
+		for (const record of this.#records.values()) {
+			if (!matchesScope(record, scope) || record.turn === undefined || !record.routingPoolKey) continue;
+			pools.add(record.routingPoolKey);
+		}
+		return [...pools];
 	}
 
 	#listIds(scope: VibeOwnerScope): string[] {
@@ -1223,6 +1248,7 @@ export class VibeSessionRegistry {
 				intent: args.intent,
 				routing: args.routing,
 				metadata: args.metadata,
+				siblingPools: this.#inFlightSiblingPools(scope),
 			});
 		} else {
 			const r = this.#resolveWorker(session, args.cli as VibeCli);
@@ -1282,6 +1308,7 @@ export class VibeSessionRegistry {
 			childSessionFile,
 			agent,
 			modelOverride,
+			routingPoolKey: resolved.routingPoolKey,
 			modelRole,
 			intent: resolved.intent,
 			routing: resolved.routing,

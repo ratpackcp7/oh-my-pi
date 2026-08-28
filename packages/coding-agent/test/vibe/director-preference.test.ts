@@ -97,6 +97,105 @@ describe("director preference: role vs cli", () => {
 		expect(screen?.intent).toBe("cheap");
 	});
 
+	it("parallel scout spawns diversify across in-flight sibling pools", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { smol: "meta/muse-spark-1.2-contributor" },
+			"task.agentModelOverrides": { scout: "@smol" },
+			"task.routing.enabled": true,
+			"task.routing.avoidParentPool": false,
+			"task.routing.parentPoolFallback": "allow",
+			"task.routing.excludePools": [],
+			"task.routing.preferPools": [],
+			"task.routing.agentModels": {
+				scout: ["google-antigravity/gemini-3.7-flash", "meta/muse-spark-1.2-contributor", "cursor/composer-2.5"],
+			},
+		});
+		const models = [
+			{
+				provider: "google-antigravity",
+				id: "gemini-3.7-flash",
+				input: ["text"],
+				supportsTools: true,
+				contextWindow: 1_000_000,
+				cost: { input: 0.1, output: 0.1 },
+				reasoning: true,
+				baseUrl: "https://agy.example",
+			},
+			{
+				provider: "meta",
+				id: "muse-spark-1.2-contributor",
+				input: ["text"],
+				supportsTools: true,
+				contextWindow: 1_000_000,
+				cost: { input: 0, output: 0 },
+				reasoning: true,
+				baseUrl: "https://meta.example",
+			},
+			{
+				provider: "cursor",
+				id: "composer-2.5",
+				input: ["text"],
+				supportsTools: true,
+				contextWindow: 200_000,
+				cost: { input: 0.2, output: 0.2 },
+				reasoning: true,
+				baseUrl: "https://cursor.example",
+			},
+		];
+		const authStorage = {
+			getOAuthAccountIdentity: () => undefined,
+			getCredentialOrigin: () => ({ kind: "api_key" }),
+		};
+		const modelRegistry = {
+			getAvailable: () => models,
+			hasConfiguredAuth: () => true,
+			getProviderBaseUrl: (provider: string) => models.find(model => model.provider === provider)?.baseUrl,
+			authStorage,
+		};
+		const parent = {
+			...makeParentSession(settings),
+			authStorage,
+			modelRegistry,
+			getActiveModelString: () => "openai-codex/gpt-5.6-sol",
+			getModelString: () => "openai-codex/gpt-5.6-sol",
+		} as unknown as ToolSession;
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async opts => {
+			await gate.promise;
+			return {
+				index: 0,
+				id: opts.id,
+				agent: opts.agent.name,
+				agentSource: "bundled",
+				task: opts.task,
+				exitCode: 0,
+				output: "done",
+				stderr: "",
+				truncated: false,
+				durationMs: 1,
+				tokens: 0,
+				requests: 0,
+			} as SingleResult;
+		});
+
+		const reg = VibeSessionRegistry.global();
+		try {
+			await reg.spawn(parent, { role: "scout", prompt: "inspect one" });
+			await reg.spawn(parent, { role: "scout", prompt: "inspect two" });
+			await reg.spawn(parent, { role: "scout", prompt: "inspect three" });
+			const planned = reg.screens(parent).map(screen => screen.plannedModel);
+			const allowed = new Set([
+				"google-antigravity/gemini-3.7-flash",
+				"meta/muse-spark-1.2-contributor",
+				"cursor/composer-2.5",
+			]);
+			expect(planned.every(model => model !== undefined && allowed.has(model))).toBe(true);
+			expect(new Set(planned).size).toBe(3);
+		} finally {
+			gate.resolve();
+		}
+	});
+
 	it("managed implementer+reviewer workflow uses role names, not good twice, and reviewer avoids implementer family", async () => {
 		const settings = Settings.isolated();
 		const reg = VibeSessionRegistry.global();
