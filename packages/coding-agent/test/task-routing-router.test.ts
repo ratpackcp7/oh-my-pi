@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { resolveResourcePool } from "../src/task/routing/pool";
 import { routeWorker } from "../src/task/routing/router";
-import { seededRandom } from "../src/task/routing/select";
+import { seededRandom, usageScoreComponent } from "../src/task/routing/select";
 import type {
 	ResourcePoolIdentity,
 	RoutingCandidateInput,
@@ -407,6 +407,133 @@ describe("task routing router", () => {
 		expect(outcome.selectors).not.toContain("cheapo/tiny");
 	});
 
+	it("headroom: healthy 0.9 beats 0.1 when otherwise equal", () => {
+		const poolHigh = pool("anthropic", { accountId: "high@x.com" });
+		const poolLow = pool("anthropic", { accountId: "low@x.com" });
+		const candidates: RoutingCandidateInput[] = [
+			candidate({ selector: "anthropic/low", pool: poolLow, usage: "healthy", usageRemainingFraction: 0.1 }),
+			candidate({ selector: "anthropic/high", pool: poolHigh, usage: "healthy", usageRemainingFraction: 0.9 }),
+		];
+		const outcome = routeWorker(request({ candidates }));
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.selectors[0]).toBe("anthropic/high");
+		expect(outcome.pool.key).toBe(poolHigh.key);
+	});
+
+	it("headroom does not beat sibling diversity: 0.1 wins when 0.9 pool is a sibling", () => {
+		const poolHigh = pool("anthropic", { accountId: "high@x.com" });
+		const poolLow = pool("anthropic", { accountId: "low@x.com" });
+		const candidates: RoutingCandidateInput[] = [
+			candidate({ selector: "anthropic/low", pool: poolLow, usage: "healthy", usageRemainingFraction: 0.1 }),
+			candidate({ selector: "anthropic/high", pool: poolHigh, usage: "healthy", usageRemainingFraction: 0.9 }),
+		];
+		const outcome = routeWorker(request({ candidates, siblingPools: [poolHigh.key] }));
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.selectors[0]).toBe("anthropic/low");
+		expect(outcome.pool.key).toBe(poolLow.key);
+	});
+
+	it("reserve with fraction 1 never outranks healthy with fraction 0", () => {
+		const healthyPool = pool("cursor", { baseUrl: "https://api.cursor.sh" });
+		const reservePool = pool("codex", { baseUrl: "https://api.openai.com" });
+		// equal cost — pure usage/headroom contest: healthy 30+0 vs reserve -40 => 70pt gap
+		const candidates: RoutingCandidateInput[] = [
+			candidate({ selector: "codex/reserve", pool: reservePool, usage: "reserve", usageRemainingFraction: 1 }),
+			candidate({ selector: "cursor/healthy", pool: healthyPool, usage: "healthy", usageRemainingFraction: 0 }),
+		];
+		const outcome = routeWorker(request({ candidates }));
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.selectors[0]).toBe("cursor/healthy");
+		expect(outcome.pool.key).toBe(healthyPool.key);
+		// reversed input order still picks healthy
+		const reversed = routeWorker(request({ candidates: [...candidates].reverse() }));
+		expect(reversed.ok).toBe(true);
+		if (!reversed.ok) return;
+		expect(reversed.selectors[0]).toBe("cursor/healthy");
+		// even when reserve is cheapest and healthy is most expensive, healthy still wins
+		const cheapReserveVsExpensiveHealthy = routeWorker(
+			request({
+				candidates: [
+					candidate({
+						selector: "codex/reserve",
+						pool: reservePool,
+						usage: "reserve",
+						usageRemainingFraction: 1,
+						costPerMTokenTotal: 0,
+					}),
+					candidate({
+						selector: "cursor/healthy",
+						pool: healthyPool,
+						usage: "healthy",
+						usageRemainingFraction: 0,
+						costPerMTokenTotal: 100,
+					}),
+				],
+			}),
+		);
+		expect(cheapReserveVsExpensiveHealthy.ok).toBe(true);
+		if (!cheapReserveVsExpensiveHealthy.ok) return;
+		expect(cheapReserveVsExpensiveHealthy.selectors[0]).toBe("cursor/healthy");
+	});
+
+	it("depleted with fraction 1 is hard-filtered", () => {
+		const depletedPool = pool("anthropic", { baseUrl: "https://api.anthropic.com" });
+		const healthyPool = pool("cursor", { baseUrl: "https://api.cursor.sh" });
+		const reservePool = pool("codex", { baseUrl: "https://api.openai.com" });
+		const candidates: RoutingCandidateInput[] = [
+			candidate({
+				selector: "anthropic/depleted",
+				pool: depletedPool,
+				usage: "depleted",
+				usageRemainingFraction: 1,
+			}),
+			candidate({ selector: "cursor/healthy", pool: healthyPool, usage: "healthy", usageRemainingFraction: 0 }),
+		];
+		const outcome = routeWorker(request({ candidates }));
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.selectors).not.toContain("anthropic/depleted");
+		expect(outcome.selectors[0]).toBe("cursor/healthy");
+		expect(outcome.pool.key).toBe(healthyPool.key);
+		// depleted alone yields no_viable_candidate
+		const alone = routeWorker(
+			request({
+				candidates: [
+					candidate({
+						selector: "anthropic/depleted",
+						pool: depletedPool,
+						usage: "depleted",
+						usageRemainingFraction: 1,
+					}),
+				],
+			}),
+		);
+		expect(alone.ok).toBe(false);
+		if (alone.ok) return;
+		expect(alone.code).toBe("no_viable_candidate");
+		// depleted is filtered even when the only alternative is reserve (reserve stays, depleted leaves)
+		const vsReserve = routeWorker(
+			request({
+				candidates: [
+					candidate({
+						selector: "anthropic/depleted",
+						pool: depletedPool,
+						usage: "depleted",
+						usageRemainingFraction: 1,
+					}),
+					candidate({ selector: "codex/reserve", pool: reservePool, usage: "reserve", usageRemainingFraction: 1 }),
+				],
+			}),
+		);
+		expect(vsReserve.ok).toBe(true);
+		if (!vsReserve.ok) return;
+		expect(vsReserve.selectors).not.toContain("anthropic/depleted");
+		expect(vsReserve.selectors[0]).toBe("codex/reserve");
+	});
+
 	it("bounded tie-break is stable for a given seed and varies across seeds", () => {
 		const pools = ["alpha", "beta", "gamma"].map(name => pool(name));
 		const candidates = pools.map((identity, index) =>
@@ -419,5 +546,57 @@ describe("task routing router", () => {
 		expect(pick("scout\u0000recon the repo")).toBe(pick("scout\u0000recon the repo"));
 		const distinct = new Set(["a", "b", "c", "d", "e", "f"].map(pick));
 		expect(distinct.size).toBeGreaterThan(1);
+	});
+});
+
+describe("usageScoreComponent headroom contract", () => {
+	const p = pool("anthropic", { baseUrl: "https://api.anthropic.com" });
+	const c = (usage: RoutingCandidateInput["usage"], fraction?: number): RoutingCandidateInput =>
+		candidate({ selector: "x/a", pool: p, usage, usageRemainingFraction: fraction });
+
+	it("healthy ladder adds 10 * fraction capped at 0..10", () => {
+		expect(usageScoreComponent(c("healthy"))).toBe(30);
+		expect(usageScoreComponent(c("healthy", 0))).toBe(30);
+		expect(usageScoreComponent(c("healthy", 0.1))).toBeCloseTo(31);
+		expect(usageScoreComponent(c("healthy", 0.5))).toBeCloseTo(35);
+		expect(usageScoreComponent(c("healthy", 0.9))).toBeCloseTo(39);
+		expect(usageScoreComponent(c("healthy", 1))).toBeCloseTo(40);
+	});
+
+	it("healthy fraction is clamped to [0,1]", () => {
+		expect(usageScoreComponent(c("healthy", -0.5))).toBe(30);
+		expect(usageScoreComponent(c("healthy", -100))).toBe(30);
+		expect(usageScoreComponent(c("healthy", 1.5))).toBeCloseTo(40);
+		expect(usageScoreComponent(c("healthy", 100))).toBeCloseTo(40);
+	});
+
+	it("unknown is 10 and ignores fraction", () => {
+		expect(usageScoreComponent(c("unknown"))).toBe(10);
+		expect(usageScoreComponent(c("unknown", 0))).toBe(10);
+		expect(usageScoreComponent(c("unknown", 0.5))).toBe(10);
+		expect(usageScoreComponent(c("unknown", 1))).toBe(10);
+	});
+
+	it("reserve is -40 and ignores fraction", () => {
+		expect(usageScoreComponent(c("reserve"))).toBe(-40);
+		expect(usageScoreComponent(c("reserve", 0))).toBe(-40);
+		expect(usageScoreComponent(c("reserve", 0.5))).toBe(-40);
+		expect(usageScoreComponent(c("reserve", 1))).toBe(-40);
+	});
+
+	it("depleted is 0 and ignores fraction", () => {
+		expect(usageScoreComponent(c("depleted"))).toBe(0);
+		expect(usageScoreComponent(c("depleted", 0))).toBe(0);
+		expect(usageScoreComponent(c("depleted", 0.9))).toBe(0);
+		expect(usageScoreComponent(c("depleted", 1))).toBe(0);
+	});
+
+	it("headroom preserves ladder gaps: healthy+fraction stays above unknown but below diversity penalty", () => {
+		// worst healthy (30) beats unknown (10) by 20; best healthy (40) loses to sibling diversity (-30) vs worst healthy
+		expect(usageScoreComponent(c("healthy", 0)) - usageScoreComponent(c("unknown", 1))).toBe(20);
+		expect(usageScoreComponent(c("healthy", 1)) - usageScoreComponent(c("healthy", 0))).toBe(10);
+		// reserve vs healthy gap is always 70+headroom, tested via router above but verified here
+		expect(usageScoreComponent(c("healthy", 0)) - usageScoreComponent(c("reserve", 1))).toBe(70);
+		expect(usageScoreComponent(c("healthy", 1)) - usageScoreComponent(c("reserve", 1))).toBe(80);
 	});
 });

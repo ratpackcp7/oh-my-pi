@@ -766,6 +766,13 @@ export type ModelUsageHealthState = "healthy" | "reserve" | "depleted" | "unknow
 export interface ModelUsageAccountHealth {
 	credentialId: number;
 	credentialType: AuthCredential["type"];
+	/**
+	 * Lowercased `accountId`, else lowercased `email`, of this credential.
+	 * Undefined for api-key credentials and identity-less OAuth rows. Mirrors
+	 * the first two branches of the routing layer's `deriveAccountKey`, so
+	 * attributing a pool to an account is a single string compare.
+	 */
+	accountKey?: string;
 	/** True when this credential is currently sticky for options.sessionId. */
 	selected?: true;
 	state: ModelUsageHealthState;
@@ -783,6 +790,11 @@ export interface ModelUsageHealthOptions {
 	sessionId?: string;
 	baseUrl?: string;
 	reserveFraction: number;
+	/**
+	 * Read persisted usage only: never fetch a provider quota endpoint, and
+	 * reject reports older than the usage report TTL.
+	 */
+	cachedOnly?: boolean;
 	signal?: AbortSignal;
 }
 
@@ -3386,7 +3398,7 @@ export class AuthStorage {
 	}
 	async #fetchUsageCached(
 		request: UsageRequestDescriptor,
-		options: { timeoutMs?: number; forceRefresh?: boolean } = {},
+		options: { timeoutMs?: number; forceRefresh?: boolean; cachedOnly?: boolean } = {},
 	): Promise<UsageReport | null> {
 		const timeoutMs = options.timeoutMs;
 		const forceRefresh = options.forceRefresh ?? false;
@@ -3398,6 +3410,10 @@ export class AuthStorage {
 		if (cached && cached.expiresAt > now) {
 			return cached.value;
 		}
+
+		// Cache-only: a miss is a miss. Never fetch, and never fall back to
+		// `getStale` — an unbounded last-good quota row must not steer routing.
+		if (options.cachedOnly === true) return null;
 
 		const usageCacheEpoch = this.#usageCacheEpoch;
 		const inFlightKey = `${cacheKey}\0${usageCacheEpoch}`;
@@ -3891,7 +3907,7 @@ export class AuthStorage {
 	async #getUsageReport(
 		provider: Provider,
 		credential: AuthCredential,
-		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal; cachedOnly?: boolean },
 	): Promise<UsageReport | null> {
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
@@ -3899,7 +3915,11 @@ export class AuthStorage {
 		// would defeat the point of routing through it. API-key credentials do
 		// not have a broker per-credential hook, so they use the normal cached
 		// provider fetch path.
-		if (credential.type === "oauth") {
+		// Under `cachedOnly` the broker hook is skipped outright: it performs a
+		// network aggregate on a cold broker cache and exposes no cached-only
+		// accessor, so broker-backed OAuth resolves to `unknown` instead of
+		// fetching — exactly today's routing behavior.
+		if (credential.type === "oauth" && options?.cachedOnly !== true) {
 			const storeHook = this.#store.getUsageReport?.bind(this.#store);
 			if (storeHook) {
 				const report = await storeHook(provider, credential, options?.signal);
@@ -3918,8 +3938,12 @@ export class AuthStorage {
 			if (!resolvedApiKey) return null;
 			usageCredential.apiKey = resolvedApiKey;
 		}
+		// The api-key branch stays intact even under `cachedOnly`:
+		// `#configValueResolver` is a local config/env read whose resolved key
+		// feeds the cache identity, so skipping it would miss every lookup.
 		return this.#fetchUsageCached(this.#buildUsageRequest(provider, usageCredential, options?.baseUrl), {
 			timeoutMs: options?.timeoutMs ?? this.#usageRequestTimeoutMs,
+			cachedOnly: options?.cachedOnly,
 		});
 	}
 
@@ -4040,12 +4064,21 @@ export class AuthStorage {
 		let accounts = await Promise.all(
 			pool.map(async ({ entry, index }): Promise<ModelUsageAccountHealth> => {
 				const credentialType = entry.credential.type;
+				// Mirrors the first two branches of the routing layer's
+				// `deriveAccountKey` (accountId, then email) so a routing pool can be
+				// attributed to this account by a single string compare.
+				const oauthCredential = entry.credential.type === "oauth" ? entry.credential : undefined;
+				const accountKey =
+					oauthCredential?.accountId?.trim().toLowerCase() ||
+					oauthCredential?.email?.trim().toLowerCase() ||
+					undefined;
 				const providerKey = this.#getProviderTypeKey(provider, credentialType);
 				let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
 				if (blockedUntil !== undefined && provider !== "openai-codex") {
 					return {
 						credentialId: entry.id,
 						credentialType,
+						accountKey,
 						state: "depleted",
 						resetsAt: blockedUntil,
 					};
@@ -4058,6 +4091,7 @@ export class AuthStorage {
 							baseUrl: options.baseUrl,
 							timeoutMs: this.#usageRequestTimeoutMs,
 							signal: options.signal,
+							cachedOnly: options.cachedOnly,
 						}),
 						options.signal,
 					);
@@ -4076,11 +4110,18 @@ export class AuthStorage {
 					return {
 						credentialId: entry.id,
 						credentialType,
+						accountKey,
 						state: "depleted",
 						resetsAt: blockedUntil,
 					};
 				}
-				if (!report) return { credentialId: entry.id, credentialType, state: "unknown" };
+				if (!report) return { credentialId: entry.id, credentialType, accountKey, state: "unknown" };
+				// A cached row past its TTL is not routing input: under `cachedOnly`
+				// nothing will refresh it, so report `unknown` rather than steering on
+				// a quota snapshot that may be arbitrarily out of date.
+				if (options.cachedOnly === true && nowMs - report.fetchedAt > USAGE_REPORT_TTL_MS) {
+					return { credentialId: entry.id, credentialType, accountKey, state: "unknown" };
+				}
 
 				// Reserve health is opt-in and non-destructive: prefer the strategy's
 				// reserve scoping, which may expose mapped model/tier rows that the
@@ -4088,14 +4129,14 @@ export class AuthStorage {
 				const limits =
 					strategy.scopeLimitsForReserve?.(report, rankingContext) ??
 					this.#getScopedUsageLimits(strategy, report, rankingContext);
-				if (limits.length === 0) return { credentialId: entry.id, credentialType, state: "unknown" };
+				if (limits.length === 0) return { credentialId: entry.id, credentialType, accountKey, state: "unknown" };
 
 				const currentLimits = limits.filter(limit => {
 					const resetsAt = limit.window?.resetsAt;
 					return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
 				});
 				if (currentLimits.length === 0) {
-					return { credentialId: entry.id, credentialType, state: "unknown" };
+					return { credentialId: entry.id, credentialType, accountKey, state: "unknown" };
 				}
 				const activeExhausted = currentLimits.filter(limit => this.#isUsageLimitExhausted(limit));
 				if (activeExhausted.length > 0) {
@@ -4105,6 +4146,7 @@ export class AuthStorage {
 					return {
 						credentialId: entry.id,
 						credentialType,
+						accountKey,
 						state: "depleted",
 						resetsAt: futureResets.length > 0 ? Math.min(...futureResets) : undefined,
 					};
@@ -4114,12 +4156,13 @@ export class AuthStorage {
 					.map(resolveUsedFraction)
 					.filter((fraction): fraction is number => fraction !== undefined);
 				if (usedFractions.length === 0) {
-					return { credentialId: entry.id, credentialType, state: "unknown" };
+					return { credentialId: entry.id, credentialType, accountKey, state: "unknown" };
 				}
 				const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
 				return {
 					credentialId: entry.id,
 					credentialType,
+					accountKey,
 					state: remainingFraction <= reserveFraction ? "reserve" : "healthy",
 					remainingFraction,
 				};

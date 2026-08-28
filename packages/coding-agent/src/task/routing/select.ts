@@ -32,13 +32,28 @@ function matchesPool(
 	);
 }
 
+/**
+ * Usage contribution to a candidate's score. Ladder: depleted is hard-filtered
+ * upstream; reserve -40; unknown +10; healthy +30 plus up to +10 of attributed
+ * headroom. The headroom cap sits above the ±5 tie-break band so it can order
+ * close calls, and well below the -30 sibling-pool penalty so pool diversity
+ * still beats a fuller repeat pool.
+ */
+export function usageScoreComponent(candidate: RoutingCandidateInput): number {
+	if (candidate.usage === "healthy") {
+		const headroom = candidate.usageRemainingFraction;
+		return 30 + (headroom === undefined ? 0 : 10 * Math.max(0, Math.min(1, headroom)));
+	}
+	if (candidate.usage === "unknown") return 10;
+	if (candidate.usage === "reserve") return -40;
+	return 0;
+}
+
 export function scoreRoutingCandidate(candidate: RoutingCandidateInput, request: RoutingRequest): number {
 	let score = 0;
 
-	// usage: healthy +30, unknown +10, reserve -40
-	if (candidate.usage === "healthy") score += 30;
-	else if (candidate.usage === "unknown") score += 10;
-	else if (candidate.usage === "reserve") score -= 40;
+	// usage ladder: see usageScoreComponent
+	score += usageScoreComponent(candidate);
 
 	// pool preference: preferPools match +25
 	const preferPools = request.policy.preferPools ?? [];

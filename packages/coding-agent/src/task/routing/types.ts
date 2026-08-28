@@ -19,6 +19,12 @@ export type RoutingCandidateInput = {
 	costPerMTokenTotal: number;
 	reasoning: boolean;
 	usage: RoutingUsageState;
+	/**
+	 * Remaining capacity fraction (0..1) for THIS pool's account, set only when the
+	 * usage row could be attributed to the credential behind `pool.accountKey`.
+	 * Undefined whenever attribution is ambiguous — never a cross-account maximum.
+	 */
+	usageRemainingFraction?: number;
 	preferredRank?: number;
 };
 

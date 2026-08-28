@@ -623,6 +623,15 @@ export class VibeSessionRegistry {
 					};
 				throw new ToolError(`routing failed: ${outcome.reason} (${outcome.code})`);
 			}
+			logger.debug("Vibe routing selected", {
+				role,
+				agent: agentName,
+				selector: outcome.selectors[0],
+				pool: outcome.pool.label,
+				reason: outcome.reason,
+				usageInfluenced: outcome.usageInfluenced,
+				trace: outcome.trace.join("; "),
+			});
 			return {
 				agent,
 				modelOverride: outcome.selectors,

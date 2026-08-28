@@ -178,6 +178,14 @@ for (let i = 0; i < 4; i++) {
 	if (result.poolKey) used.push(result.poolKey);
 }
 console.log(`distinct sibling pools: ${new Set(used).size} of ${used.length}`);
+const usageCounts = Object.groupBy(snapshot.candidates, candidate => candidate.usage);
+const freshUsagePools = new Set(
+	snapshot.candidates.filter(candidate => candidate.usage !== "unknown").map(candidate => candidate.pool.key),
+);
+console.log(
+	`usage coverage: ${usageCounts.healthy?.length ?? 0} healthy, ${usageCounts.reserve?.length ?? 0} reserve, ${usageCounts.depleted?.length ?? 0} depleted, ${usageCounts.unknown?.length ?? 0} unknown of ${snapshot.candidates.length} candidates across ${pools.length} pools`,
+);
+console.log(`fresh cached usage pools: ${freshUsagePools.size} of ${pools.length}`);
 
 console.log("\n## worker roster: composer-2.5 offered as a candidate for every agent");
 const composer = "cursor/composer-2.5";
@@ -190,7 +198,7 @@ const rosterSnapshot = await buildRoutingSnapshot(sessionFor(OPUS, { "task.routi
 const composerCandidate = rosterSnapshot.candidates.find(candidate => candidate.selector === composer);
 console.log(
 	composerCandidate
-		? `composer candidate: pool=${composerCandidate.pool.label} usage=${composerCandidate.usage} tools=${composerCandidate.supportsTools} ctx=${composerCandidate.contextWindow} rank=${composerCandidate.preferredRank}`
+		? `composer candidate: pool=${composerCandidate.pool.label} usage=${composerCandidate.usage} remaining=${composerCandidate.usageRemainingFraction ?? "n/a"} tools=${composerCandidate.supportsTools} ctx=${composerCandidate.contextWindow} rank=${composerCandidate.preferredRank}`
 		: "composer candidate: NOT ELIGIBLE (absent from available registry)",
 );
 
