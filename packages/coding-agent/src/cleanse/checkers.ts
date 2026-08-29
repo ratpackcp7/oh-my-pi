@@ -1,7 +1,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $which, isRecord, ptree, sanitizeText } from "@oh-my-pi/pi-utils";
+import { mapWithConcurrencyLimit } from "../task/parallel";
 import * as git from "../utils/git";
+import { memoryIntensiveCommandBlockReason } from "../utils/host-memory-pressure";
 import { CLEANSE_PARSER_KINDS, type CleanseParserKind, parseCleanseDiagnostics } from "./parsers";
 import type { CleanseCheckResult, CleanseDiagnostic, CleanseDiagnosticReport, SkippedCleanseCheck } from "./types";
 
@@ -21,6 +23,7 @@ const IGNORED_DIRECTORIES: Record<string, true> = {
 const MAX_FAILURE_OUTPUT = 12_000;
 const DEFAULT_FLUSH_MS = 5_000;
 const SHELLCHECK_BATCH_SIZE = 200;
+const MAX_CONCURRENT_CHECKERS = 2;
 
 interface CheckerPlan {
 	id: string;
@@ -164,10 +167,20 @@ function createSuite(
 		},
 		async run(options?: CleanseSuiteRunOptions): Promise<CleanseDiagnosticReport> {
 			const { signal, events, flushMs = DEFAULT_FLUSH_MS } = options ?? {};
+			const runSkipped = [...skipped];
 			const execute = async (
 				plan: CheckerPlan,
 				onDiagnostics?: (diagnostics: readonly CleanseDiagnostic[]) => void,
-			): Promise<CleanseCheckResult> => {
+			): Promise<CleanseCheckResult | undefined> => {
+				const memoryPressureReason = await memoryIntensiveCommandBlockReason(plan.command);
+				if (memoryPressureReason) {
+					runSkipped.push({
+						label: plan.label,
+						language: plan.language,
+						reason: `deferred: ${memoryPressureReason}`,
+					});
+					return undefined;
+				}
 				events?.onCheckerStart?.(toDescriptor(plan));
 				const startedAt = Date.now();
 				const check = await runChecker(plan, projectCwd, allowedFiles, { signal, flushMs, onDiagnostics });
@@ -178,31 +191,35 @@ function createSuite(
 			// every mutator has finished; otherwise a repair worker could edit a
 			// file a formatter is still rewriting.
 			const mutating = active.filter(plan => plan.mutates);
-			const mutatingChecks: CleanseCheckResult[] = [];
-			for (const plan of mutating) mutatingChecks.push(await execute(plan));
+			const mutatingChecks: Array<{ plan: CheckerPlan; check: CleanseCheckResult }> = [];
+			for (const plan of mutating) {
+				const check = await execute(plan);
+				if (check) mutatingChecks.push({ plan, check });
+			}
 			if (events?.onDiagnostics) {
-				for (let index = 0; index < mutating.length; index += 1) {
-					const check = mutatingChecks[index];
-					if (check.diagnostics.length > 0) events.onDiagnostics(toDescriptor(mutating[index]), check.diagnostics);
+				for (const { plan, check } of mutatingChecks) {
+					if (check.diagnostics.length > 0) events.onDiagnostics(toDescriptor(plan), check.diagnostics);
 				}
 			}
-			const parallelChecks = await Promise.all(
-				active
-					.filter(plan => !plan.mutates)
-					.map(plan =>
-						execute(
-							plan,
-							events?.onDiagnostics
-								? diagnostics => events.onDiagnostics?.(toDescriptor(plan), diagnostics)
-								: undefined,
-						),
+			const nonMutating = active.filter(plan => !plan.mutates);
+			const { results } = await mapWithConcurrencyLimit(
+				nonMutating,
+				MAX_CONCURRENT_CHECKERS,
+				async plan =>
+					await execute(
+						plan,
+						events?.onDiagnostics
+							? diagnostics => events.onDiagnostics?.(toDescriptor(plan), diagnostics)
+							: undefined,
 					),
+				signal,
 			);
-			const checks = [...mutatingChecks, ...parallelChecks];
+			const parallelChecks = results.filter((check): check is CleanseCheckResult => check !== undefined);
+			const checks = [...mutatingChecks.map(({ check }) => check), ...parallelChecks];
 			return {
 				checks,
 				diagnostics: deduplicateProjectDiagnostics(checks.flatMap(check => check.diagnostics)),
-				skipped: [...skipped],
+				skipped: runSkipped,
 			};
 		},
 	};
