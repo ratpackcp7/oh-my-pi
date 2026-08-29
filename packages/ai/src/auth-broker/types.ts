@@ -210,3 +210,5 @@ export const DEFAULT_STREAM_KEEPALIVE_MS = 20_000;
  * timeout (10s) would close long-lived SSE connections between keepalives.
  */
 export const DEFAULT_SERVER_IDLE_TIMEOUT_S = 255;
+
+export { BROKER_CREDENTIAL_ID_METADATA_KEY, readBrokerCredentialIdMetadata } from "../usage";

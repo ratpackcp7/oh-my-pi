@@ -11,6 +11,7 @@ import {
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { readBrokerCredentialIdMetadata } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const SYNTHETIC_META_KEY_A = "synthetic-meta-api-key-alpha-7f3c";
@@ -18,15 +19,17 @@ const SYNTHETIC_META_KEY_B = "synthetic-meta-api-key-bravo-9d2e";
 const TOKEN = "meta-usage-limit-bearer";
 
 function rateLimitHeaders(tokensRemaining: number): Record<string, string> {
+	const requestsRemaining = Math.round((tokensRemaining / 1000) * 100);
 	return {
 		"x-ratelimit-limit-tokens": "1000",
 		"x-ratelimit-remaining-tokens": String(tokensRemaining),
 		"x-ratelimit-limit-requests": "100",
-		"x-ratelimit-remaining-requests": "80",
+		"x-ratelimit-remaining-requests": String(requestsRemaining),
 	};
 }
 
 function metaReport(tokensRemaining: number, fetchedAt = Date.now()): UsageReport {
+	const requestsRemaining = Math.round((tokensRemaining / 1000) * 100);
 	return {
 		provider: "meta",
 		fetchedAt,
@@ -46,9 +49,43 @@ function metaReport(tokensRemaining: number, fetchedAt = Date.now()): UsageRepor
 				},
 				status: tokensRemaining <= 0 ? "exhausted" : tokensRemaining / 1000 <= 0.1 ? "warning" : "ok",
 			},
+			{
+				id: "meta:requests:1m",
+				label: "Meta Request Rate Limit",
+				scope: { provider: "meta", windowId: "1m", shared: true },
+				window: { id: "1m", label: "Per Minute", durationMs: 60_000 },
+				amount: {
+					used: 100 - requestsRemaining,
+					limit: 100,
+					remaining: requestsRemaining,
+					usedFraction: (100 - requestsRemaining) / 100,
+					remainingFraction: requestsRemaining / 100,
+					unit: "requests",
+				},
+				status: requestsRemaining <= 0 ? "exhausted" : requestsRemaining / 100 <= 0.1 ? "warning" : "ok",
+			},
 		],
 		metadata: { source: "ratelimit-headers", scope: "team" },
 	};
+}
+
+async function assignDistinctMetaSessions(
+	storage: AuthStorage,
+	keyA: string,
+	keyB: string,
+): Promise<{ sessionA: string; sessionB: string }> {
+	for (let left = 0; left < 32; left++) {
+		for (let right = 0; right < 32; right++) {
+			if (left === right) continue;
+			const sessionA = `meta-session-${left}`;
+			const sessionB = `meta-session-${right}`;
+			const resolvedA = await storage.getApiKey("meta", sessionA);
+			const resolvedB = await storage.getApiKey("meta", sessionB);
+			if (resolvedA === keyA && resolvedB === keyB) return { sessionA, sessionB };
+			if (resolvedA === keyB && resolvedB === keyA) return { sessionA, sessionB };
+		}
+	}
+	throw new Error("unable to assign distinct Meta API-key sessions");
 }
 
 describe("auth-broker Meta usage limit durability", () => {
@@ -60,8 +97,17 @@ describe("auth-broker Meta usage limit durability", () => {
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-meta-limit-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		store.saveApiKey("meta", SYNTHETIC_META_KEY_A);
-		store.saveApiKey("meta", SYNTHETIC_META_KEY_B);
+		store.upsertAuthCredentialForProvider("meta", {
+			type: "api_key",
+			key: SYNTHETIC_META_KEY_A,
+			source: "login",
+		});
+		store.upsertAuthCredentialForProvider("meta", {
+			type: "api_key",
+			key: SYNTHETIC_META_KEY_B,
+			source: "login",
+		});
+		expect(store.listAuthCredentials("meta")).toHaveLength(2);
 		storage = new AuthStorage(store);
 		await storage.reload();
 		handle = startAuthBroker({
@@ -87,13 +133,15 @@ describe("auth-broker Meta usage limit durability", () => {
 			streamSnapshots: false,
 		});
 		await remoteA.refreshSnapshot();
-		const credA = remoteA.listAuthCredentials("meta").find(entry => entry.credential.type === "api_key");
+		const storageA = new AuthStorage(remoteA);
+		await storageA.reload();
+		const sessionKey = await storageA.getApiKey("meta", "session-a");
+		const credA = remoteA.listAuthCredentials("meta").find(
+			entry => entry.credential.type === "api_key" && entry.credential.key === sessionKey,
+		);
 		expect(credA).toBeDefined();
 		if (!credA || credA.credential.type !== "api_key") throw new Error("expected Meta API-key fixture");
 
-		const storageA = new AuthStorage(remoteA);
-		await storageA.reload();
-		await storageA.getApiKey("meta", "session-a");
 		const ingestSpy = vi.spyOn(brokerClientA, "ingestUsageLimitReport");
 		expect(
 			await storageA.ingestUsageHeaders("meta", rateLimitHeaders(800), { sessionId: "session-a" }),
@@ -115,6 +163,15 @@ describe("auth-broker Meta usage limit durability", () => {
 		await storageB.reload();
 		const reports = await storageB.fetchUsageReports();
 		expect(reports?.some(report => report.limits[0]?.amount.remainingFraction === 0.8)).toBe(true);
+		const brokerUsage = await fetch(`${handle!.url}/v1/usage`, {
+			headers: { Authorization: `Bearer ${TOKEN}` },
+		}).then(response => response.json() as Promise<{ reports: UsageReport[] }>);
+		const brokerReport = brokerUsage.reports.find(
+			report => report.limits[0]?.amount.remainingFraction === 0.8,
+		);
+		expect(brokerReport?.metadata?.brokerCredentialId).toBe(credA.id);
+		expect(JSON.stringify(brokerUsage)).not.toContain(SYNTHETIC_META_KEY_A);
+		expect(JSON.stringify(brokerUsage)).not.toContain(SYNTHETIC_META_KEY_B);
 		const health = await storageB.getModelUsageHealth("meta", {
 			modelId: "muse-spark-1.2",
 			reserveFraction: 0.1,
@@ -151,6 +208,25 @@ describe("auth-broker Meta usage limit durability", () => {
 			}),
 		).rejects.toBeInstanceOf(AuthBrokerError);
 
+		const spoofedCredentialId = storage!.exportSnapshot().credentials[0]!.id;
+		const victimCredentialId = storage!.exportSnapshot().credentials[1]?.id ?? spoofedCredentialId + 1;
+		await client.ingestUsageLimitReport({
+			credentialId: spoofedCredentialId,
+			report: {
+				...report,
+				metadata: { ...report.metadata, brokerCredentialId: victimCredentialId },
+			},
+		});
+		const brokerUsage = await fetch(`${handle!.url}/v1/usage`, {
+			headers: { Authorization: `Bearer ${TOKEN}` },
+		}).then(response => response.json() as Promise<{ reports: UsageReport[] }>);
+		const storedReport = brokerUsage.reports.find(
+			entry =>
+				readBrokerCredentialIdMetadata((entry.metadata ?? {}) as Record<string, unknown>) === spoofedCredentialId,
+		);
+		expect(storedReport?.metadata?.brokerCredentialId).toBe(spoofedCredentialId);
+		expect(storedReport?.metadata?.brokerCredentialId).not.toBe(victimCredentialId);
+
 		const rawResponse = await fetch(`${handle!.url}/v1/usage/limit-report`, {
 			method: "POST",
 			headers: {
@@ -174,22 +250,19 @@ describe("auth-broker Meta usage limit durability", () => {
 
 		const storageA = new AuthStorage(remoteA);
 		await storageA.reload();
-		const keyForSessionA = await storageA.getApiKey("meta", "session-a");
-		const keyForSessionB = await storageA.getApiKey("meta", "session-b");
-		expect(keyForSessionB).not.toBe(keyForSessionA);
-		const credA = metaRows.find(
-			entry => entry.credential.type === "api_key" && entry.credential.key === keyForSessionA,
-		);
-		const credB = metaRows.find(
-			entry => entry.credential.type === "api_key" && entry.credential.key === keyForSessionB,
-		);
+		const credA = metaRows.find(entry => entry.credential.type === "api_key" && entry.credential.key === SYNTHETIC_META_KEY_A);
+		const credB = metaRows.find(entry => entry.credential.type === "api_key" && entry.credential.key === SYNTHETIC_META_KEY_B);
 		expect(credA).toBeDefined();
 		expect(credB).toBeDefined();
 		if (!credA || credA.credential.type !== "api_key") throw new Error("missing cred A");
 		if (!credB || credB.credential.type !== "api_key") throw new Error("missing cred B");
+		const { sessionA, sessionB } = await assignDistinctMetaSessions(storageA, credA.credential.key, credB.credential.key);
+		const sessionForCredA =
+			(await storageA.getApiKey("meta", sessionA)) === credA.credential.key ? sessionA : sessionB;
+		const sessionForCredB = sessionForCredA === sessionA ? sessionB : sessionA;
 
-		await storageA.ingestUsageHeaders("meta", rateLimitHeaders(200), { sessionId: "session-a" });
-		await storageA.ingestUsageHeaders("meta", rateLimitHeaders(900), { sessionId: "session-b" });
+		await storageA.ingestUsageHeaders("meta", rateLimitHeaders(200), { sessionId: sessionForCredA });
+		await storageA.ingestUsageHeaders("meta", rateLimitHeaders(900), { sessionId: sessionForCredB });
 		remoteA.close();
 
 		const brokerClientB = new AuthBrokerClient({ url: handle!.url, token: TOKEN });
@@ -197,6 +270,7 @@ describe("auth-broker Meta usage limit durability", () => {
 		await remoteB.refreshSnapshot();
 		const storageB = new AuthStorage(remoteB);
 		await storageB.reload();
+		await storageB.fetchUsageReports();
 		let health = await storageB.getModelUsageHealth("meta", {
 			modelId: "muse-spark-1.2",
 			reserveFraction: 0.1,
@@ -206,7 +280,14 @@ describe("auth-broker Meta usage limit durability", () => {
 		expect(health.accounts.find(account => account.credentialId === credB.id)?.remainingFraction).toBeCloseTo(0.9);
 
 		await clientReplaceReport(brokerClientB, credA.id, metaReport(750, now));
-		health = await storageB.getModelUsageHealth("meta", {
+		remoteB.close();
+		storageB.close();
+		const remoteC = new RemoteAuthCredentialStore({ client: brokerClientB, streamSnapshots: false });
+		await remoteC.refreshSnapshot();
+		const storageC = new AuthStorage(remoteC);
+		await storageC.reload();
+		await storageC.fetchUsageReports();
+		health = await storageC.getModelUsageHealth("meta", {
 			modelId: "muse-spark-1.2",
 			reserveFraction: 0.1,
 			cachedOnly: true,
@@ -214,16 +295,16 @@ describe("auth-broker Meta usage limit durability", () => {
 		expect(health.accounts.find(account => account.credentialId === credA.id)?.remainingFraction).toBeCloseTo(0.75);
 
 		now += 60_001;
-		health = await storageB.getModelUsageHealth("meta", {
+		health = await storageC.getModelUsageHealth("meta", {
 			modelId: "muse-spark-1.2",
 			reserveFraction: 0.1,
 			cachedOnly: true,
 		});
 		expect(health.state).toBe("unknown");
 
-		remoteB.close();
+		remoteC.close();
 		storageA.close();
-		storageB.close();
+		storageC.close();
 	});
 
 	test("old broker 404 on limit-report does not break Meta header ingest", async () => {

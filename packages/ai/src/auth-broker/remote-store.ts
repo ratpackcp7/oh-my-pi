@@ -24,6 +24,7 @@ import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
+import { readBrokerCredentialIdMetadata } from "../usage";
 import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
 import type {
 	CredentialBlockSnapshot,
@@ -1134,11 +1135,17 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * to `null` so the candidate stays `unknown`.
 	 */
 	peekCachedUsageReport(provider: Provider, credential: AuthCredential): UsageReport | null {
-		const overlay = this.#getActiveUsageOverlay(provider, credential, this.#usageOverlayTtlMs(provider));
+		const overlayTtlMs = this.#usageOverlayTtlMs(provider);
+		const overlay = this.#getActiveUsageOverlay(provider, credential, overlayTtlMs);
 		// API-key providers do not expose an account/team identity that can safely
-		// match a broker aggregate row. Only the exact credential's overlay is
-		// attributable; anything else must remain unknown.
-		if (credential.type === "api_key") return overlay ?? null;
+		// match a broker aggregate row. Only the exact credential's overlay or a
+		// broker-tagged report for the same credential row id is attributable.
+		if (credential.type === "api_key") {
+			if (overlay) return overlay;
+			const credentialId = this.#resolveCredentialId(provider, credential);
+			if (credentialId === undefined) return null;
+			return this.#peekBrokerUsageReportForCredential(provider, credentialId, overlayTtlMs);
+		}
 		const cached = this.#usageCache;
 		if (cached && Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS && cached.reports !== null) {
 			const reports = this.#filterUsageReports(cached.reports);
@@ -1254,6 +1261,26 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			return undefined;
 		}
 		return overlay;
+	}
+
+	#peekBrokerUsageReportForCredential(
+		provider: Provider,
+		credentialId: number,
+		ttlMs: number,
+	): UsageReport | null {
+		const cached = this.#usageCache;
+		if (!cached || Date.now() - cached.fetchedAt >= USAGE_CACHE_TTL_MS || cached.reports === null) {
+			return null;
+		}
+		const now = Date.now();
+		for (const report of this.#filterUsageReports(cached.reports)) {
+			if (report.provider !== provider) continue;
+			const reportCredentialId = readBrokerCredentialIdMetadata((report.metadata ?? {}) as Record<string, unknown>);
+			if (reportCredentialId !== credentialId) continue;
+			if (now - report.fetchedAt >= ttlMs) continue;
+			return report;
+		}
+		return null;
 	}
 
 	#applyUsageOverlays(reports: UsageReport[]): UsageReport[] {

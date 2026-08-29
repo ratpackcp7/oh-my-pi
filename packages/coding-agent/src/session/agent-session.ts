@@ -1241,15 +1241,13 @@ export class AgentSession {
 		this.#onResponse = configuredOnResponse
 			? async (response, model) => {
 					this.rawSseDebugBuffer.recordResponse(response, model);
-					this.#stats.ingestProviderUsageHeaders(response, model);
+					await this.#stats.ingestProviderUsageHeaders(response, model);
 					await this.#maybeRefreshLazyLocalContext(response, model);
 					await configuredOnResponse(response, model);
 				}
-			: (response, model) => {
+			: async (response, model) => {
 					this.rawSseDebugBuffer.recordResponse(response, model);
-					this.#stats.ingestProviderUsageHeaders(response, model);
-					// Returns void (no allocation) unless a one-time lazy-model
-					// refresh is actually due, preserving the sync fast path.
+					await this.#stats.ingestProviderUsageHeaders(response, model);
 					return this.#maybeRefreshLazyLocalContext(response, model);
 				};
 		const configuredOnSseEvent = config.onSseEvent;

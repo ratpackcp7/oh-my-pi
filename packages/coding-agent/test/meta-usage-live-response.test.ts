@@ -79,7 +79,7 @@ describe("Meta usage live response ingest", () => {
 		};
 
 		await storage.getApiKey("meta", "live-response-session");
-		tracker.ingestProviderUsageHeaders(response, model);
+		await tracker.ingestProviderUsageHeaders(response, model);
 
 		const reports = await storage.fetchUsageReports();
 		expect(reports).toHaveLength(1);

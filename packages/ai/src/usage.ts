@@ -120,6 +120,24 @@ export interface UsageReport {
 }
 
 /**
+ * Broker-owned metadata on header-derived usage reports. The broker host sets
+ * this from the validated `POST /v1/usage/limit-report` credential route id;
+ * clients must never trust a supplied value.
+ */
+export const BROKER_CREDENTIAL_ID_METADATA_KEY = "brokerCredentialId";
+
+/** Parse a broker credential row id from report metadata; absent or malformed → undefined. */
+export function readBrokerCredentialIdMetadata(metadata: Record<string, unknown> | undefined): number | undefined {
+	const value = metadata?.[BROKER_CREDENTIAL_ID_METADATA_KEY];
+	if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+	if (typeof value === "string") {
+		const parsed = Number.parseInt(value, 10);
+		if (Number.isInteger(parsed) && parsed > 0) return parsed;
+	}
+	return undefined;
+}
+
+/**
  * Resolve a limit's used fraction (0..1; >1 means overage) from whichever
  * amount fields the provider populated. Precedence mirrors the usage UIs:
  * explicit fraction > used/limit > percent-unit used > inverted remaining.

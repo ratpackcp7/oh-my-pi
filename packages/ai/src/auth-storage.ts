@@ -49,7 +49,13 @@ import type {
 	UsageProviderHealth,
 	UsageReport,
 } from "./usage";
-import { classifyUsageFetchThrow, observeUsageFetch, resolveUsedFraction } from "./usage";
+import {
+	BROKER_CREDENTIAL_ID_METADATA_KEY,
+	classifyUsageFetchThrow,
+	observeUsageFetch,
+	readBrokerCredentialIdMetadata,
+	resolveUsedFraction,
+} from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { cursorUsageProvider } from "./usage/cursor";
@@ -3787,7 +3793,17 @@ export class AuthStorage {
 			headerTtlMs !== undefined && Number.isFinite(headerTtlMs) && headerTtlMs > 0
 				? now + headerTtlMs
 				: Math.max(priorEntry?.expiresAt ?? now - 1, now - 1);
-		this.#usageCache.set(cacheKey, { value: merged, expiresAt });
+		const cacheEntry = { value: merged, expiresAt };
+		this.#usageCache.set(cacheKey, cacheEntry);
+		// Response interceptors pass the resolved provider base URL while aggregate
+		// reads (fetchUsageReports, cached-only routing) usually omit it. Mirror the
+		// header snapshot under the default key so both paths observe the same row.
+		if (options?.baseUrl?.trim()) {
+			const defaultCacheKey = this.#buildUsageReportCacheKey(
+				this.#buildUsageRequest(provider, credential.usage, undefined),
+			);
+			if (defaultCacheKey !== cacheKey) this.#usageCache.set(defaultCacheKey, cacheEntry);
+		}
 		this.#usageHeaderIngestAt.set(cacheKey, now);
 		return true;
 	}
@@ -3948,6 +3964,12 @@ export class AuthStorage {
 	}
 
 	#getUsageReportIdentifiers(report: UsageReport): string[] {
+		const brokerCredentialId = readBrokerCredentialIdMetadata(
+			(report.metadata ?? {}) as Record<string, unknown>,
+		);
+		if (brokerCredentialId !== undefined) {
+			return [`${report.provider}:broker-credential:${brokerCredentialId}`];
+		}
 		const identifiers: string[] = [];
 		const email = this.#getUsageReportMetadataValue(report, "email");
 		if (email) identifiers.push(`email:${email.toLowerCase()}`);
@@ -4132,6 +4154,16 @@ export class AuthStorage {
 		}
 		const usageCredential = this.#buildUsageCredential(credential);
 		if (credential.type === "api_key") {
+			if (options?.cachedOnly === true) {
+				const peekHook = this.#store.peekCachedUsageReport?.bind(this.#store);
+				if (peekHook) {
+					try {
+						return peekHook(provider, credential);
+					} catch {
+						return null;
+					}
+				}
+			}
 			const resolvedApiKey = await this.#configValueResolver(credential.key);
 			if (!resolvedApiKey) return null;
 			usageCredential.apiKey = resolvedApiKey;
@@ -7060,7 +7092,14 @@ export class AuthStorage {
 		const cacheKey = this.#buildUsageReportCacheKey(this.#buildUsageRequest(provider, usageCredential));
 		const priorEntry = this.#usageCache.getStale<UsageReport | null>(cacheKey);
 		const prior = priorEntry?.value;
-		let merged = report;
+		const taggedReport: UsageReport = {
+			...report,
+			metadata: {
+				...(report.metadata ?? {}),
+				[BROKER_CREDENTIAL_ID_METADATA_KEY]: credentialId,
+			},
+		};
+		let merged = taggedReport;
 		if (prior && Array.isArray(prior.limits)) {
 			const headerLimitsById = new Map(report.limits.map(limit => [limit.id, limit]));
 			const limits: UsageLimit[] = [];
@@ -7081,9 +7120,10 @@ export class AuthStorage {
 				fetchedAt: now,
 				limits,
 				metadata: {
-					...(report.metadata ?? {}),
+					...(taggedReport.metadata ?? {}),
 					...(prior.metadata ?? {}),
-					source: report.metadata?.source ?? prior.metadata?.source,
+					[BROKER_CREDENTIAL_ID_METADATA_KEY]: credentialId,
+					source: taggedReport.metadata?.source ?? prior.metadata?.source,
 					headersUpdatedAt: now,
 				},
 			};

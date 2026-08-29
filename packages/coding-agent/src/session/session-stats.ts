@@ -336,13 +336,19 @@ export class SessionStatsTracker {
 	}
 
 	/** Records provider usage headers against the active session account. */
-	ingestProviderUsageHeaders(response: ProviderResponseMetadata, model?: Model): void {
+	async ingestProviderUsageHeaders(response: ProviderResponseMetadata, model?: Model): Promise<void> {
 		const provider = model?.provider;
 		if (!provider) return;
-		this.#host.modelRegistry.authStorage.ingestUsageHeaders(provider, response.headers, {
-			sessionId: this.#host.agent.sessionId,
-			baseUrl: this.#host.modelRegistry.getProviderBaseUrl?.(provider),
-		});
+		try {
+			await Promise.resolve(
+				this.#host.modelRegistry.authStorage.ingestUsageHeaders(provider, response.headers, {
+					sessionId: this.#host.agent.sessionId,
+					baseUrl: this.#host.modelRegistry.getProviderBaseUrl?.(provider),
+				}),
+			);
+		} catch {
+			// Usage-header ingest is best-effort and must not break model responses.
+		}
 	}
 }
 
