@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { memoryIntensiveCommandBlockReason } from "../utils/host-memory-pressure";
 
 /** Project type detection result */
 export interface ProjectType {
@@ -192,6 +193,10 @@ async function runProjectDiagnostics(cwd: string, projectType: ProjectType, sign
 	const command = projectType.command;
 	if (!command) {
 		return "Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml)";
+	}
+	const memoryPressureReason = await memoryIntensiveCommandBlockReason(command.join(" "));
+	if (memoryPressureReason) {
+		return `Deferred ${projectType.description}: ${memoryPressureReason}. Wait for host memory headroom before retrying workspace diagnostics.`;
 	}
 	try {
 		const proc = Bun.spawn(command, {

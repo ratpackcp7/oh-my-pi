@@ -5,6 +5,7 @@
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
+import { memoryIntensiveCommandBlockReason } from "../../utils/host-memory-pressure";
 
 // =============================================================================
 // Biome JSON Output Types
@@ -64,6 +65,14 @@ async function runBiome(
 	signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; success: boolean }> {
 	const command = resolvedCommand ?? "biome";
+	const memoryPressureReason = await memoryIntensiveCommandBlockReason([command, ...args].join(" "));
+	if (memoryPressureReason) {
+		return {
+			stdout: "",
+			stderr: `Biome deferred: ${memoryPressureReason}. Wait for host memory headroom before retrying.`,
+			success: false,
+		};
+	}
 
 	try {
 		const proc = Bun.spawn([command, ...args], {

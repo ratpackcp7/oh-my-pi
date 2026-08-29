@@ -10,6 +10,7 @@ import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/p
 import { getDefault, Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
+import { memoryIntensiveCommandBlockReason } from "../utils/host-memory-pressure";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
@@ -532,6 +533,22 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
+	const memoryPressureReason = await memoryIntensiveCommandBlockReason(command);
+	if (memoryPressureReason) {
+		const output = `Command not started: ${memoryPressureReason}. Wait for host memory headroom before retrying this memory-intensive command.`;
+		const outputBytes = new TextEncoder().encode(output).byteLength;
+		return {
+			output,
+			exitCode: 75,
+			cancelled: false,
+			truncated: false,
+			totalLines: 1,
+			totalBytes: outputBytes,
+			outputLines: 1,
+			outputBytes,
+			workingDir: commandCwd,
+		};
+	}
 	// Fold the repo's direnv/devenv env into the command + env so devenv tools
 	// land on PATH; the caller's explicit `env` still wins. Thread the caller's
 	// signal + timeout so an aborted / short-timeout call can't hang on a cold
