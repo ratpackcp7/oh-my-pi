@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added provider-authoritative Meta Model API per-minute headroom to usage reports and routing when response headers are available.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added

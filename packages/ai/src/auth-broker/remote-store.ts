@@ -7,6 +7,7 @@
  * usage reports cache TTL is 5 minutes per credential, so durability across
  * runs isn't required.
  */
+import { createHash } from "node:crypto";
 import * as os from "node:os";
 import { getAppName, getInstallId, logger } from "@oh-my-pi/pi-utils";
 import {
@@ -182,6 +183,16 @@ function usageOverlayKey(
 	if (orgId) return base ? `${provider}\0org:${orgId}|${base}` : `${provider}\0org:${orgId}`;
 	if (base) return `${provider}\0${base}`;
 	return undefined;
+}
+
+function usageCredentialOverlayKey(provider: Provider, credential: AuthCredential): string | undefined {
+	if (credential.type === "api_key") {
+		const key = credential.key.trim();
+		if (!key) return undefined;
+		const fingerprint = createHash("sha256").update(key).digest("base64url");
+		return `${provider}\0api-key:${fingerprint}`;
+	}
+	return usageOverlayKey(provider, credential);
 }
 
 function mergeUsageReports(base: UsageReport, overlay: UsageReport): UsageReport {
@@ -1119,19 +1130,19 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * (accountId/email) matches the candidate pool. Cold or expired resolves
 	 * to `null` so the candidate stays `unknown`.
 	 */
-	peekCachedUsageReport(provider: Provider, credential: OAuthCredential): UsageReport | null {
+	peekCachedUsageReport(provider: Provider, credential: AuthCredential): UsageReport | null {
+		const overlay = this.#getActiveUsageOverlay(provider, credential);
+		// API-key providers do not expose an account/team identity that can safely
+		// match a broker aggregate row. Only the exact credential's overlay is
+		// attributable; anything else must remain unknown.
+		if (credential.type === "api_key") return overlay ?? null;
 		const cached = this.#usageCache;
 		if (cached && Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS && cached.reports !== null) {
-			const reports = this.#filterUsageReports(this.#applyUsageOverlays(cached.reports));
+			const reports = this.#filterUsageReports(cached.reports);
 			const matched = matchUsageReport(reports, provider, credential);
-			const overlay = this.#getActiveUsageOverlay(provider, credential);
 			if (matched && overlay) return mergeUsageReports(matched, overlay);
-			if (matched) return matched;
-			if (overlay) return overlay;
-			return null;
+			return overlay ?? matched;
 		}
-		// No fresh aggregate — an overlay alone may still warm the credential.
-		const overlay = this.#getActiveUsageOverlay(provider, credential);
 		return overlay ?? null;
 	}
 
@@ -1170,17 +1181,17 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return output;
 	}
 
-	ingestUsageReport(provider: Provider, credential: OAuthCredential, report: UsageReport): boolean {
+	ingestUsageReport(provider: Provider, credential: AuthCredential, report: UsageReport): boolean {
 		this.#noteActivity();
-		const key = usageOverlayKey(provider, credential);
+		const key = usageCredentialOverlayKey(provider, credential);
 		if (!key) return false;
 		const activeOverlay = this.#getActiveUsageOverlay(provider, credential);
 		this.#usageOverlays.set(key, activeOverlay ? mergeUsageReports(activeOverlay, report) : report);
 		return true;
 	}
 
-	#getActiveUsageOverlay(provider: Provider, credential: OAuthCredential): UsageReport | undefined {
-		const key = usageOverlayKey(provider, credential);
+	#getActiveUsageOverlay(provider: Provider, credential: AuthCredential): UsageReport | undefined {
+		const key = usageCredentialOverlayKey(provider, credential);
 		if (!key) return undefined;
 		const overlay = this.#usageOverlays.get(key);
 		if (!overlay) return undefined;
@@ -1192,12 +1203,18 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#applyUsageOverlays(reports: UsageReport[]): UsageReport[] {
-		const overlays = [...this.#usageOverlays.values()].filter(
-			overlay => Date.now() - overlay.fetchedAt < USAGE_CACHE_TTL_MS,
+		const overlays = [...this.#usageOverlays.entries()].filter(
+			([, overlay]) => Date.now() - overlay.fetchedAt < USAGE_CACHE_TTL_MS,
 		);
 		if (overlays.length === 0) return reports;
 		const merged = [...reports];
-		for (const overlay of overlays) {
+		for (const [key, overlay] of overlays) {
+			// An API-key overlay is exact-credential state. Never merge it into an
+			// unattributed provider row or a sibling key's report.
+			if (key.includes("\0api-key:")) {
+				merged.push(overlay);
+				continue;
+			}
 			const matchIndex = findMatchingReportIndex(merged, overlay);
 			if (matchIndex === -1) {
 				merged.push(overlay);

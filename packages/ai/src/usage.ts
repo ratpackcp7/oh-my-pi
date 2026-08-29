@@ -358,6 +358,13 @@ export interface UsageProvider {
 	validatesCredentials?: boolean;
 	/** Whether a failed refresh may serve the previous successful report. Defaults to true. */
 	retainLastGoodOnFailure?: boolean;
+	/**
+	 * Lifetime for reports created from response headers when no polling endpoint
+	 * exists. Once expired, normal cache failure handling drops the observation.
+	 */
+	headerReportTtlMs?: number;
+	/** True when usage exists only in normal-response headers and must never be actively polled. */
+	pollingDisabled?: boolean;
 }
 
 // ─── Usage-fetch health telemetry ──────────────────────────────────────────

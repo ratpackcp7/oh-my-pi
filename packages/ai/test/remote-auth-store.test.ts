@@ -973,6 +973,88 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		remoteStore.close();
 	});
 
+	test("keeps Meta API-key header overlays isolated by credential", async () => {
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: {
+				generation: 0,
+				generatedAt: 0,
+				serverNowMs: 0,
+				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+				credentials: [],
+			},
+		});
+		const now = Date.now();
+		const fetchSpy = vi.spyOn(brokerClient, "fetchUsage").mockResolvedValue({ generatedAt: now, reports: [] });
+		const credA = { type: "api_key" as const, key: "meta-key-a", source: "login" as const };
+		const credB = { type: "api_key" as const, key: "meta-key-b", source: "login" as const };
+		const unrelatedOAuth = {
+			type: "oauth" as const,
+			access: "oauth-access",
+			refresh: REMOTE_REFRESH_SENTINEL,
+			expires: now + 60_000,
+			accountId: "unrelated-account",
+		};
+		const exhausted: UsageReport = {
+			provider: "meta",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "meta:tokens:1m",
+					label: "Meta Token Rate Limit",
+					scope: { provider: "meta", windowId: "1m", shared: true },
+					window: { id: "1m", label: "Per Minute", durationMs: 60_000 },
+					amount: {
+						used: 1000,
+						limit: 1000,
+						remaining: 0,
+						usedFraction: 1,
+						remainingFraction: 0,
+						unit: "tokens",
+					},
+					status: "exhausted",
+				},
+			],
+			metadata: { source: "ratelimit-headers", scope: "team" },
+		};
+		const healthy: UsageReport = {
+			...exhausted,
+			limits: [
+				{
+					...exhausted.limits[0]!,
+					amount: {
+						used: 200,
+						limit: 1000,
+						remaining: 800,
+						usedFraction: 0.2,
+						remainingFraction: 0.8,
+						unit: "tokens",
+					},
+					status: "ok",
+				},
+			],
+		};
+
+		try {
+			expect(remoteStore.ingestUsageReport("meta", credA, exhausted)).toBe(true);
+			expect(await remoteStore.fetchUsageReports()).toHaveLength(1);
+			expect(remoteStore.peekCachedUsageReport("meta", unrelatedOAuth)).toBeNull();
+			expect(remoteStore.ingestUsageReport("meta", credB, healthy)).toBe(true);
+			expect(remoteStore.peekCachedUsageReport("meta", credA)?.limits[0]?.status).toBe("exhausted");
+			expect(remoteStore.peekCachedUsageReport("meta", credB)?.limits[0]?.amount.remainingFraction).toBe(0.8);
+
+			const reports = await remoteStore.fetchUsageReports();
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+			expect(reports).toHaveLength(2);
+			expect(
+				reports?.map(report => report.limits[0]?.amount.used).sort((left, right) => (left ?? 0) - (right ?? 0)),
+			).toEqual([200, 1000]);
+		} finally {
+			remoteStore.close();
+		}
+	});
+
 	test("fetchUsageReports keeps a broker failure null even when a client overlay exists", async () => {
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
 		const remoteStore = new RemoteAuthCredentialStore({
