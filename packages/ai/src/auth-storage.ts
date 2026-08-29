@@ -536,7 +536,7 @@ export interface AuthCredentialStore {
 	 * onto their cached aggregate `/v1/usage` response without mutating broker
 	 * state.
 	 */
-	ingestUsageReport?(provider: Provider, credential: AuthCredential, report: UsageReport): boolean;
+	ingestUsageReport?(provider: Provider, credential: AuthCredential, report: UsageReport): boolean | Promise<boolean>;
 	/**
 	 * Optional store hook to invalidate a specific credential after the upstream
 	 * provider returned 401 on a supposedly-fresh key. Remote stores force the
@@ -3654,7 +3654,7 @@ export class AuthStorage {
 		credential: UsageHeaderCredential,
 		options: { baseUrl?: string } | undefined,
 		now: number,
-	): boolean {
+	): boolean | Promise<boolean> {
 		const request = this.#buildUsageRequest(provider, credential.usage, options?.baseUrl);
 		if (providerImpl.supports && !providerImpl.supports(request)) return false;
 		const cacheKey = this.#buildUsageReportCacheKey(request);
@@ -3680,12 +3680,71 @@ export class AuthStorage {
 		const storeIngest = this.#store.ingestUsageReport?.bind(this.#store);
 		if (storeIngest) {
 			const ingested = storeIngest(provider, credential.auth, report);
-			if (credential.auth.type === "oauth") {
-				if (ingested) this.#usageHeaderIngestAt.set(cacheKey, now);
-				return ingested;
+			if (ingested instanceof Promise) {
+				return ingested.then(resolved =>
+					this.#finishHeaderIngestAfterStore(
+						resolved,
+						provider,
+						providerImpl,
+						report,
+						credential,
+						options,
+						now,
+						cacheKey,
+					),
+				);
 			}
+			const finished = this.#finishHeaderIngestAfterStore(
+				ingested,
+				provider,
+				providerImpl,
+				report,
+				credential,
+				options,
+				now,
+				cacheKey,
+			);
+			if (credential.auth.type === "oauth") return finished;
+			if (this.#store.fetchUsageReports) return finished;
 		}
 
+		if (this.#fetchUsageReportsOverride || (credential.auth.type === "oauth" && this.#store.fetchUsageReports)) {
+			return false;
+		}
+		return this.#persistHeaderUsageReportLocally(provider, providerImpl, report, credential, options, now, cacheKey);
+	}
+
+	#finishHeaderIngestAfterStore(
+		ingested: boolean,
+		provider: Provider,
+		providerImpl: UsageProvider,
+		report: UsageReport,
+		credential: UsageHeaderCredential,
+		options: { baseUrl?: string } | undefined,
+		now: number,
+		cacheKey: string,
+	): boolean {
+		if (credential.auth.type === "oauth") {
+			if (ingested) this.#usageHeaderIngestAt.set(cacheKey, now);
+			return ingested;
+		}
+		if (this.#store.fetchUsageReports) {
+			if (ingested) this.#usageHeaderIngestAt.set(cacheKey, now);
+			return ingested;
+		}
+		if (!ingested) return false;
+		return this.#persistHeaderUsageReportLocally(provider, providerImpl, report, credential, options, now, cacheKey);
+	}
+
+	#persistHeaderUsageReportLocally(
+		provider: Provider,
+		providerImpl: UsageProvider,
+		report: UsageReport,
+		credential: UsageHeaderCredential,
+		options: { baseUrl?: string } | undefined,
+		now: number,
+		cacheKey: string,
+	): boolean {
 		if (this.#fetchUsageReportsOverride || (credential.auth.type === "oauth" && this.#store.fetchUsageReports)) {
 			return false;
 		}
@@ -6971,6 +7030,68 @@ export class AuthStorage {
 			}
 		}
 		return { generation: this.#generation, generatedAt: Date.now(), credentials: entries };
+	}
+
+	/**
+	 * Broker-host ingest for a sanitized header-derived usage report. Resolves the
+	 * stored credential by id, writes through the canonical per-credential usage
+	 * cache, and bounds lifetime to the provider's header TTL.
+	 */
+	ingestHeaderUsageReport(credentialId: number, report: UsageReport): boolean {
+		let stored: StoredCredential | undefined;
+		let provider: Provider | undefined;
+		for (const [providerId, entries] of this.#data) {
+			const match = entries.find(entry => entry.id === credentialId);
+			if (match) {
+				stored = match;
+				provider = providerId as Provider;
+				break;
+			}
+		}
+		if (!stored || !provider) return false;
+		if (report.provider !== provider) return false;
+		const providerImpl = this.#resolveUsageProvider(provider);
+		if (!providerImpl) return false;
+		const headerTtlMs = providerImpl.headerReportTtlMs;
+		if (headerTtlMs === undefined || !Number.isFinite(headerTtlMs) || headerTtlMs <= 0) return false;
+
+		const now = Date.now();
+		const usageCredential = this.#buildUsageCredential(stored.credential);
+		const cacheKey = this.#buildUsageReportCacheKey(this.#buildUsageRequest(provider, usageCredential));
+		const priorEntry = this.#usageCache.getStale<UsageReport | null>(cacheKey);
+		const prior = priorEntry?.value;
+		let merged = report;
+		if (prior && Array.isArray(prior.limits)) {
+			const headerLimitsById = new Map(report.limits.map(limit => [limit.id, limit]));
+			const limits: UsageLimit[] = [];
+			for (const limit of prior.limits) {
+				const replacement = headerLimitsById.get(limit.id);
+				if (replacement) {
+					limits.push(replacement);
+					headerLimitsById.delete(limit.id);
+				} else {
+					limits.push(limit);
+				}
+			}
+			for (const limit of headerLimitsById.values()) {
+				limits.push(limit);
+			}
+			merged = {
+				...prior,
+				fetchedAt: now,
+				limits,
+				metadata: {
+					...(report.metadata ?? {}),
+					...(prior.metadata ?? {}),
+					source: report.metadata?.source ?? prior.metadata?.source,
+					headersUpdatedAt: now,
+				},
+			};
+		}
+		const expiresAt = now + headerTtlMs;
+		this.#usageCache.set(cacheKey, { value: merged, expiresAt });
+		this.#usageHeaderIngestAt.set(cacheKey, now);
+		return true;
 	}
 
 	/**

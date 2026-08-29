@@ -119,6 +119,17 @@ export interface UsageStaleResponse {
 	ok: boolean;
 }
 
+/** POST /v1/usage/limit-report request body — sanitized header-derived usage limit report for one credential. */
+export interface UsageLimitReportRequest {
+	credentialId: number;
+	report: UsageReport;
+}
+
+/** POST /v1/usage/limit-report response body. */
+export interface UsageLimitReportResponse {
+	ok: boolean;
+}
+
 /**
  * POST /v1/credential request body. The OAuth `refresh` must be the *real*
  * refresh token (not the sentinel) — the broker is the canonical writer.

@@ -26,6 +26,8 @@ import type {
 	SnapshotResponse,
 	SnapshotStreamEvent,
 	UsageHistoryResponse,
+	UsageLimitReportRequest,
+	UsageLimitReportResponse,
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
@@ -43,6 +45,7 @@ import {
 	snapshotResponseSchema,
 	snapshotStreamEventSchema,
 	usageHistoryResponseSchema,
+	usageLimitReportResponseSchema,
 	usageResponseSchema,
 	usageStaleResponseSchema,
 } from "./wire-schemas";
@@ -59,6 +62,7 @@ const RESPONSE_SCHEMAS = {
 	disabledCredentialsResponseSchema,
 	healthzResponseSchema,
 	usageHistoryResponseSchema,
+	usageLimitReportResponseSchema,
 	usageResponseSchema,
 	usageStaleResponseSchema,
 } as const;
@@ -322,6 +326,15 @@ export class AuthBrokerClient {
 	notifyUsageStale(signal?: AbortSignal): Promise<UsageStaleResponse> {
 		return this.#request<UsageStaleResponse>("POST", "/v1/usage/stale", {
 			schema: "usageStaleResponseSchema",
+			signal,
+		});
+	}
+
+	/** Publish a sanitized header-derived usage-limit report for one broker credential. */
+	ingestUsageLimitReport(request: UsageLimitReportRequest, signal?: AbortSignal): Promise<UsageLimitReportResponse> {
+		return this.#request<UsageLimitReportResponse>("POST", "/v1/usage/limit-report", {
+			body: request,
+			schema: "usageLimitReportResponseSchema",
 			signal,
 		});
 	}

@@ -58,6 +58,7 @@ function isCredentialInAccountPool(
  * one broker call instead of N.
  */
 const USAGE_CACHE_TTL_MS = 15_000;
+const META_USAGE_OVERLAY_TTL_MS = 60_000;
 const CREDENTIAL_BLOCK_RECONCILE_DELAY_MS = 5 * 60_000;
 const WAIT_THRESHOLD_MS = 1_000;
 const MAX_WAIT_MS = 5_000;
@@ -301,6 +302,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	readonly #observedUsageFlushMs: number;
 	/** Latched once the broker answered 404 — old broker, never report again. */
 	#observedUsageUnsupported = false;
+	/** Latched once the broker predates `POST /v1/usage/limit-report`. */
+	#usageLimitReportUnsupported = false;
 
 	constructor(opts: RemoteAuthCredentialStoreOptions) {
 		this.#client = opts.client;
@@ -1104,7 +1107,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const reports = await this.#raceWithSignal(this.#loadUsageReports(), signal);
 		const visibleReports = reports ? this.#filterUsageReports(reports) : null;
 		const matched = visibleReports ? matchUsageReport(visibleReports, provider, credential) : null;
-		const overlay = this.#getActiveUsageOverlay(provider, credential);
+		const overlay = this.#getActiveUsageOverlay(provider, credential, this.#usageOverlayTtlMs(provider));
 		if (matched && overlay) return mergeUsageReports(matched, overlay);
 		return overlay ?? matched;
 	}
@@ -1131,7 +1134,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * to `null` so the candidate stays `unknown`.
 	 */
 	peekCachedUsageReport(provider: Provider, credential: AuthCredential): UsageReport | null {
-		const overlay = this.#getActiveUsageOverlay(provider, credential);
+		const overlay = this.#getActiveUsageOverlay(provider, credential, this.#usageOverlayTtlMs(provider));
 		// API-key providers do not expose an account/team identity that can safely
 		// match a broker aggregate row. Only the exact credential's overlay is
 		// attributable; anything else must remain unknown.
@@ -1181,21 +1184,72 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return output;
 	}
 
-	ingestUsageReport(provider: Provider, credential: AuthCredential, report: UsageReport): boolean {
+	ingestUsageReport(provider: Provider, credential: AuthCredential, report: UsageReport): boolean | Promise<boolean> {
 		this.#noteActivity();
 		const key = usageCredentialOverlayKey(provider, credential);
 		if (!key) return false;
-		const activeOverlay = this.#getActiveUsageOverlay(provider, credential);
+		const overlayTtlMs = this.#usageOverlayTtlMs(provider);
+		const activeOverlay = this.#getActiveUsageOverlay(provider, credential, overlayTtlMs);
 		this.#usageOverlays.set(key, activeOverlay ? mergeUsageReports(activeOverlay, report) : report);
-		return true;
+		if (provider !== "meta" || credential.type !== "api_key") return true;
+		const credentialId = this.#resolveCredentialId(provider, credential);
+		if (credentialId === undefined) return true;
+		return this.#publishUsageLimitReport(credentialId, report);
 	}
 
-	#getActiveUsageOverlay(provider: Provider, credential: AuthCredential): UsageReport | undefined {
+	#usageOverlayTtlMs(provider: Provider): number {
+		return provider === "meta" ? META_USAGE_OVERLAY_TTL_MS : USAGE_CACHE_TTL_MS;
+	}
+
+	#resolveCredentialId(provider: Provider, credential: AuthCredential): number | undefined {
+		if (credential.type === "api_key") {
+			const key = credential.key.trim();
+			if (!key) return undefined;
+			const fingerprint = createHash("sha256").update(key).digest("base64url");
+			for (const entry of this.#snapshot.credentials) {
+				if (entry.provider !== provider || entry.credential.type !== "api_key") continue;
+				const entryKey = entry.credential.key.trim();
+				if (!entryKey) continue;
+				const entryFingerprint = createHash("sha256").update(entryKey).digest("base64url");
+				if (entryFingerprint === fingerprint) return entry.id;
+			}
+			return undefined;
+		}
+		for (const entry of this.#snapshot.credentials) {
+			if (entry.provider !== provider || entry.credential.type !== "oauth") continue;
+			if (usageOverlayKey(provider, credential) === usageOverlayKey(provider, entry.credential)) return entry.id;
+		}
+		return undefined;
+	}
+
+	async #publishUsageLimitReport(credentialId: number, report: UsageReport): Promise<boolean> {
+		if (this.#usageLimitReportUnsupported) return true;
+		const { raw: _raw, ...sanitized } = report;
+		try {
+			await this.#client.ingestUsageLimitReport({ credentialId, report: sanitized });
+			return true;
+		} catch (error) {
+			const status = error instanceof AuthBrokerError ? error.status : undefined;
+			if (status === 404 || status === 501) {
+				this.#usageLimitReportUnsupported = true;
+				logger.debug("auth-broker does not accept usage limit reports; broker durability disabled", { status });
+				return true;
+			}
+			logger.debug("auth-broker usage limit report failed", { id: credentialId, error: String(error) });
+			return true;
+		}
+	}
+
+	#getActiveUsageOverlay(
+		provider: Provider,
+		credential: AuthCredential,
+		ttlMs = USAGE_CACHE_TTL_MS,
+	): UsageReport | undefined {
 		const key = usageCredentialOverlayKey(provider, credential);
 		if (!key) return undefined;
 		const overlay = this.#usageOverlays.get(key);
 		if (!overlay) return undefined;
-		if (Date.now() - overlay.fetchedAt >= USAGE_CACHE_TTL_MS) {
+		if (Date.now() - overlay.fetchedAt >= ttlMs) {
 			this.#usageOverlays.delete(key);
 			return undefined;
 		}
@@ -1203,9 +1257,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#applyUsageOverlays(reports: UsageReport[]): UsageReport[] {
-		const overlays = [...this.#usageOverlays.entries()].filter(
-			([, overlay]) => Date.now() - overlay.fetchedAt < USAGE_CACHE_TTL_MS,
-		);
+		const overlays = [...this.#usageOverlays.entries()].filter(([, overlay]) => {
+			const ttlMs = this.#usageOverlayTtlMs(overlay.provider as Provider);
+			return Date.now() - overlay.fetchedAt < ttlMs;
+		});
 		if (overlays.length === 0) return reports;
 		const merged = [...reports];
 		for (const [key, overlay] of overlays) {

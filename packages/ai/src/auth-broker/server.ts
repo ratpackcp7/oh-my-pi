@@ -46,6 +46,7 @@ import {
 	credentialBlockRequestSchema,
 	credentialDisableRequestSchema,
 	credentialUploadRequestSchema,
+	usageLimitReportRequestSchema,
 } from "./wire-schemas";
 
 const DEFAULT_EXTERNAL_CHANGE_POLL_MS = 250;
@@ -761,6 +762,31 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						logger.warn("auth-broker usage cache invalidation failed", { peer, error: message });
 						return json(500, { error: message });
 					}
+				}
+				if (req.method === "POST" && pathname === "/v1/usage/limit-report") {
+					const parsed = await parseBody(req, usageLimitReportRequestSchema);
+					if (!parsed.ok) return parsed.response;
+					const { credentialId, report } = parsed.data;
+					const stored = opts.storage.exportSnapshot().credentials.find(entry => entry.id === credentialId);
+					if (!stored) {
+						logger.info("auth-broker usage limit report miss", { id: credentialId, peer });
+						return json(404, { error: `No credential with id=${credentialId}` });
+					}
+					if (report.provider !== stored.provider) {
+						return json(400, {
+							error: `Report provider ${report.provider} does not match credential provider ${stored.provider}`,
+						});
+					}
+					const ingested = opts.storage.ingestHeaderUsageReport(credentialId, report);
+					if (!ingested) {
+						return json(400, { error: "Usage limit report rejected" });
+					}
+					logger.debug("auth-broker usage limit report ingested", {
+						peer,
+						id: credentialId,
+						provider: stored.provider,
+					});
+					return json(200, { ok: true });
 				}
 				if (req.method === "GET" && pathname === "/v1/credentials/disabled") {
 					const provider = url.searchParams.get("provider") ?? undefined;

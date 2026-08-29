@@ -5,6 +5,7 @@
 ### Added
 
 - Added provider-authoritative Meta Model API per-minute headroom to usage reports and routing when response headers are available.
+- Added broker `POST /v1/usage/limit-report` so header-derived Meta usage limits persist through the canonical auth broker for cross-process readers.
 
 ## [18.0.7] - 2026-08-26
 
