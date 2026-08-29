@@ -45,6 +45,8 @@ import type {
 	SnapshotStreamRemovedEvent,
 	SnapshotStreamSnapshotEvent,
 	UsageHistoryResponse,
+	UsageLimitReportRequest,
+	UsageLimitReportResponse,
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
@@ -251,6 +253,17 @@ const arkUsageReportSchema = type({
 	"raw?": "unknown",
 });
 
+/** Sanitized usage report accepted on `POST /v1/usage/limit-report` — `raw` is rejected. */
+const sanitizedUsageReportSchema = type({
+	"+": "reject",
+	provider: "string",
+	fetchedAt: "number",
+	limits: usageLimitSchema.array(),
+	"resetCredits?": usageResetCreditsSchema,
+	"notes?": "string[]",
+	"metadata?": { "[string]": "unknown" },
+});
+
 /**
  * Per-provider usage-fetch telemetry (see `AuthStorage.getUsageHealth`).
  * Secret-free: only timestamps and a fixed error code, never credential
@@ -404,6 +417,18 @@ export const credentialBlocksDeleteResponseSchema: FluentType<CredentialBlocksDe
 });
 
 export const usageStaleResponseSchema: FluentType<UsageStaleResponse> = type({
+	"+": "reject",
+	ok: "boolean",
+});
+
+/** Broker `POST /v1/usage/limit-report` request — credential id plus sanitized report. */
+export const usageLimitReportRequestSchema: FluentType<UsageLimitReportRequest> = type({
+	"+": "reject",
+	credentialId: "number.integer",
+	report: sanitizedUsageReportSchema,
+});
+
+export const usageLimitReportResponseSchema: FluentType<UsageLimitReportResponse> = type({
 	"+": "reject",
 	ok: "boolean",
 });

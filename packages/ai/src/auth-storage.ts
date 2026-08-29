@@ -49,7 +49,13 @@ import type {
 	UsageProviderHealth,
 	UsageReport,
 } from "./usage";
-import { classifyUsageFetchThrow, observeUsageFetch, resolveUsedFraction } from "./usage";
+import {
+	BROKER_CREDENTIAL_ID_METADATA_KEY,
+	classifyUsageFetchThrow,
+	observeUsageFetch,
+	readBrokerCredentialIdMetadata,
+	resolveUsedFraction,
+} from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { cursorUsageProvider } from "./usage/cursor";
@@ -57,6 +63,7 @@ import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./usage/kimi";
+import { metaRankingStrategy, metaUsageProvider } from "./usage/meta";
 import { minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
@@ -526,16 +533,16 @@ export interface AuthCredentialStore {
 	 * response (15s TTL) or `null` for cold/expired; local stores omit it.
 	 * Routing uses this so candidate ranking never blocks on provider probes.
 	 */
-	peekCachedUsageReport?(provider: Provider, credential: OAuthCredential): UsageReport | null;
+	peekCachedUsageReport?(provider: Provider, credential: AuthCredential): UsageReport | null;
 	/** Passive aggregate peek counterpart; `null` means cold or expired. */
 	peekCachedUsageReports?(): UsageReport[] | null;
 	/**
-	 * Optional store hook to ingest a parsed provider usage report for one OAuth
+	 * Optional store hook to ingest a parsed provider usage report for one
 	 * credential. Remote broker stores use this to overlay header-derived limits
 	 * onto their cached aggregate `/v1/usage` response without mutating broker
 	 * state.
 	 */
-	ingestUsageReport?(provider: Provider, credential: OAuthCredential, report: UsageReport): boolean;
+	ingestUsageReport?(provider: Provider, credential: AuthCredential, report: UsageReport): boolean | Promise<boolean>;
 	/**
 	 * Optional store hook to invalidate a specific credential after the upstream
 	 * provider returned 401 on a supposedly-fresh key. Remote stores force the
@@ -677,6 +684,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	ollamaUsageProvider,
 	ollamaCloudUsageProvider,
 	claudeUsageProvider,
+	metaUsageProvider,
 	zaiUsageProvider,
 	umansUsageProvider,
 	opencodeGoUsageProvider,
@@ -824,6 +832,11 @@ type UsageRequestDescriptor = {
 	provider: Provider;
 	credential: UsageCredential;
 	baseUrl?: string;
+};
+
+type UsageHeaderCredential = {
+	auth: AuthCredential;
+	usage: UsageCredential;
 };
 
 type ForcedUsageRefresh = {
@@ -1136,6 +1149,7 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["anthropic", claudeRankingStrategy],
 	["google-antigravity", antigravityRankingStrategy],
 	["kimi-code", kimiRankingStrategy],
+	["meta", metaRankingStrategy],
 	["zai", zaiRankingStrategy],
 	["opencode-go", opencodeGoRankingStrategy],
 ]);
@@ -2888,6 +2902,81 @@ export class AuthStorage {
 		return stickyCredential?.type === "oauth" ? stickyCredential : oauthCredentials[0];
 	}
 
+	async #resolveStoredApiKeyUsageCredential(credential: ApiKeyCredential): Promise<UsageHeaderCredential | undefined> {
+		try {
+			const apiKey = await this.#configValueResolver(credential.key);
+			if (!apiKey) return undefined;
+			return {
+				auth: credential,
+				usage: { type: "api_key", apiKey },
+			};
+		} catch {
+			this.#usageLogger?.debug("usage header API key reference resolution failed");
+			return undefined;
+		}
+	}
+
+	#resolveActiveApiKeyUsageCredential(
+		provider: string,
+		sessionId?: string,
+	): UsageHeaderCredential | Promise<UsageHeaderCredential | undefined> | undefined {
+		const runtimeKey = this.#runtimeOverrides.get(provider);
+		if (runtimeKey) {
+			return {
+				auth: { type: "api_key", key: runtimeKey },
+				usage: { type: "api_key", apiKey: runtimeKey },
+			};
+		}
+		const configKey = this.#configOverrides.get(provider);
+		if (configKey) {
+			return {
+				auth: { type: "api_key", key: configKey },
+				usage: { type: "api_key", apiKey: configKey },
+			};
+		}
+
+		const stored = this.#getStoredCredentials(provider);
+		const session = this.#getSessionCredential(provider, sessionId);
+		if (session?.type === "oauth") return undefined;
+		if (session?.type === "api_key") {
+			const credential = stored[session.index]?.credential;
+			if (credential?.type !== "api_key") return undefined;
+			return this.#resolveStoredApiKeyUsageCredential(credential);
+		}
+
+		const loginKeys = stored
+			.map(entry => entry.credential)
+			.filter(
+				(credential): credential is ApiKeyCredential =>
+					credential.type === "api_key" && credential.source === "login",
+			);
+		if (loginKeys.length > 1) return undefined;
+		const loginKey = loginKeys[0];
+		if (loginKey) return this.#resolveStoredApiKeyUsageCredential(loginKey);
+
+		const envKey = getEnvApiKey(provider);
+		if (envKey) {
+			return {
+				auth: { type: "api_key", key: envKey },
+				usage: { type: "api_key", apiKey: envKey },
+			};
+		}
+
+		const storedKeys = stored
+			.map(entry => entry.credential)
+			.filter((credential): credential is ApiKeyCredential => credential.type === "api_key");
+		if (storedKeys.length > 1) return undefined;
+		const storedKey = storedKeys[0];
+		if (storedKey) return this.#resolveStoredApiKeyUsageCredential(storedKey);
+
+		const fallbackKey = this.#fallbackResolver?.(provider);
+		if (!fallbackKey) return undefined;
+		return {
+			auth: { type: "api_key", key: fallbackKey },
+			usage: { type: "api_key", apiKey: fallbackKey },
+		};
+	}
+
 	/**
 	 * Get the OAuth `accountId` for a provider, preferring the credential that is
 	 * session-sticky for `sessionId` when multiple OAuth credentials are configured.
@@ -3276,6 +3365,7 @@ export class AuthStorage {
 	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
 		const providerImpl = this.#resolveUsageProvider(request.provider);
 		if (!providerImpl) return null;
+		if (providerImpl.pollingDisabled) return null;
 
 		const timeoutSignal =
 			typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
@@ -3563,47 +3653,107 @@ export class AuthStorage {
 		return this.#store.getClientUsageSummary?.(sinceMs) ?? { clients: [] };
 	}
 
-	ingestUsageHeaders(
+	#ingestParsedUsageHeaders(
 		provider: Provider,
-		headers: Record<string, string>,
-		options?: { sessionId?: string; baseUrl?: string },
-	): boolean {
-		if (this.#fetchUsageReportsOverride) return false;
-		const parseHeaders = this.#resolveUsageProvider(provider)?.parseRateLimitHeaders;
-		if (!parseHeaders) return false;
-
-		const credential = this.#resolveActiveOAuthCredential(provider, options?.sessionId);
-		if (!credential) return false;
-
-		const cacheKey = this.#buildUsageReportCacheKey(
-			this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl),
-		);
-		const now = Date.now();
-		const parsedReport = parseHeaders(headers, now);
-		if (!parsedReport) return false;
+		providerImpl: UsageProvider,
+		parsedReport: UsageReport,
+		credential: UsageHeaderCredential,
+		options: { baseUrl?: string } | undefined,
+		now: number,
+	): boolean | Promise<boolean> {
+		const request = this.#buildUsageRequest(provider, credential.usage, options?.baseUrl);
+		if (providerImpl.supports && !providerImpl.supports(request)) return false;
+		const cacheKey = this.#buildUsageReportCacheKey(request);
 		// Throttled to one ingest per interval — except when a window reads
 		// exhausted: persist that snapshot immediately. A full-backed cache can
-		// then block the next getApiKey; a cold header-only snapshot first probes
-		// the usage endpoint.
+		// then block the next getApiKey; a header-only snapshot remains bounded
+		// by the provider's explicit header TTL.
 		const exhausted = parsedReport.limits.some(limit => this.#isUsageLimitExhausted(limit));
 		const last = this.#usageHeaderIngestAt.get(cacheKey);
 		if (!exhausted && last !== undefined && now - last < USAGE_HEADER_INGEST_INTERVAL_MS) return false;
 		const metadata: Record<string, unknown> = { ...(parsedReport.metadata ?? {}) };
-		if (credential.accountId && metadata.accountId === undefined) metadata.accountId = credential.accountId;
-		if (credential.email && metadata.email === undefined) metadata.email = credential.email;
-		if (credential.projectId && metadata.projectId === undefined) metadata.projectId = credential.projectId;
-		if (credential.orgId && metadata.orgId === undefined) metadata.orgId = credential.orgId;
-		if (credential.orgName && metadata.orgName === undefined) metadata.orgName = credential.orgName;
+		if (credential.auth.type === "oauth") {
+			if (credential.auth.accountId && metadata.accountId === undefined)
+				metadata.accountId = credential.auth.accountId;
+			if (credential.auth.email && metadata.email === undefined) metadata.email = credential.auth.email;
+			if (credential.auth.projectId && metadata.projectId === undefined)
+				metadata.projectId = credential.auth.projectId;
+			if (credential.auth.orgId && metadata.orgId === undefined) metadata.orgId = credential.auth.orgId;
+			if (credential.auth.orgName && metadata.orgName === undefined) metadata.orgName = credential.auth.orgName;
+		}
 		const report: UsageReport = { ...parsedReport, metadata };
 
 		const storeIngest = this.#store.ingestUsageReport?.bind(this.#store);
 		if (storeIngest) {
-			const ingested = storeIngest(provider, credential, report);
+			const ingested = storeIngest(provider, credential.auth, report);
+			if (ingested instanceof Promise) {
+				return ingested.then(resolved =>
+					this.#finishHeaderIngestAfterStore(
+						resolved,
+						provider,
+						providerImpl,
+						report,
+						credential,
+						options,
+						now,
+						cacheKey,
+					),
+				);
+			}
+			const finished = this.#finishHeaderIngestAfterStore(
+				ingested,
+				provider,
+				providerImpl,
+				report,
+				credential,
+				options,
+				now,
+				cacheKey,
+			);
+			if (credential.auth.type === "oauth") return finished;
+			if (this.#store.fetchUsageReports) return finished;
+		}
+
+		if (this.#fetchUsageReportsOverride || (credential.auth.type === "oauth" && this.#store.fetchUsageReports)) {
+			return false;
+		}
+		return this.#persistHeaderUsageReportLocally(provider, providerImpl, report, credential, options, now, cacheKey);
+	}
+
+	#finishHeaderIngestAfterStore(
+		ingested: boolean,
+		provider: Provider,
+		providerImpl: UsageProvider,
+		report: UsageReport,
+		credential: UsageHeaderCredential,
+		options: { baseUrl?: string } | undefined,
+		now: number,
+		cacheKey: string,
+	): boolean {
+		if (credential.auth.type === "oauth") {
 			if (ingested) this.#usageHeaderIngestAt.set(cacheKey, now);
 			return ingested;
 		}
+		if (this.#store.fetchUsageReports) {
+			if (ingested) this.#usageHeaderIngestAt.set(cacheKey, now);
+			return ingested;
+		}
+		if (!ingested) return false;
+		return this.#persistHeaderUsageReportLocally(provider, providerImpl, report, credential, options, now, cacheKey);
+	}
 
-		if (this.#fetchUsageReportsOverride || this.#store.fetchUsageReports) return false;
+	#persistHeaderUsageReportLocally(
+		provider: Provider,
+		providerImpl: UsageProvider,
+		report: UsageReport,
+		credential: UsageHeaderCredential,
+		options: { baseUrl?: string } | undefined,
+		now: number,
+		cacheKey: string,
+	): boolean {
+		if (this.#fetchUsageReportsOverride || (credential.auth.type === "oauth" && this.#store.fetchUsageReports)) {
+			return false;
+		}
 		const priorEntry = this.#usageCache.getStale<UsageReport | null>(cacheKey);
 		const prior = priorEntry?.value;
 		let merged = report;
@@ -3635,15 +3785,70 @@ export class AuthStorage {
 			};
 		}
 
-		// Header ingestion merges values but never extends a cache entry's lifetime.
-		// Preserve the existing expiry (including active failure cooldowns) so full
-		// reports refetch on their original 5-minute schedule and full-payload-only
-		// rows such as extra usage stay current; headers only refresh window rows
-		// between fetches. A newly minted header-only report is durable but stale.
-		const expiresAt = Math.max(priorEntry?.expiresAt ?? now - 1, now - 1);
-		this.#usageCache.set(cacheKey, { value: merged, expiresAt });
+		// Poll-backed providers preserve the original expiry so full reports
+		// refetch on schedule. Header-only providers instead get a short,
+		// explicit lifetime and degrade to unknown after it passes.
+		const headerTtlMs = providerImpl.headerReportTtlMs;
+		const expiresAt =
+			headerTtlMs !== undefined && Number.isFinite(headerTtlMs) && headerTtlMs > 0
+				? now + headerTtlMs
+				: Math.max(priorEntry?.expiresAt ?? now - 1, now - 1);
+		const cacheEntry = { value: merged, expiresAt };
+		this.#usageCache.set(cacheKey, cacheEntry);
+		// Response interceptors pass the resolved provider base URL while aggregate
+		// reads (fetchUsageReports, cached-only routing) usually omit it. Mirror the
+		// header snapshot under the default key so both paths observe the same row.
+		if (options?.baseUrl?.trim()) {
+			const defaultCacheKey = this.#buildUsageReportCacheKey(
+				this.#buildUsageRequest(provider, credential.usage, undefined),
+			);
+			if (defaultCacheKey !== cacheKey) this.#usageCache.set(defaultCacheKey, cacheEntry);
+		}
 		this.#usageHeaderIngestAt.set(cacheKey, now);
 		return true;
+	}
+
+	ingestUsageHeaders(
+		provider: Provider,
+		headers: Record<string, string>,
+		options?: { sessionId?: string; baseUrl?: string },
+	): boolean | Promise<boolean> {
+		if (this.#fetchUsageReportsOverride) return false;
+		const providerImpl = this.#resolveUsageProvider(provider);
+		const parseHeaders = providerImpl?.parseRateLimitHeaders;
+		if (!providerImpl || !parseHeaders) return false;
+		const now = Date.now();
+		const parsedReport = parseHeaders(headers, now);
+		if (!parsedReport) return false;
+
+		const oauth = this.#resolveActiveOAuthCredential(provider, options?.sessionId);
+		if (oauth) {
+			return this.#ingestParsedUsageHeaders(
+				provider,
+				providerImpl,
+				parsedReport,
+				{ auth: oauth, usage: this.#buildUsageCredential(oauth) },
+				options,
+				now,
+			);
+		}
+
+		const apiKey = this.#resolveActiveApiKeyUsageCredential(provider, options?.sessionId);
+		if (apiKey instanceof Promise) {
+			return apiKey
+				.then(resolved =>
+					resolved
+						? this.#ingestParsedUsageHeaders(provider, providerImpl, parsedReport, resolved, options, now)
+						: false,
+				)
+				.catch(() => {
+					this.#usageLogger?.debug("deferred usage header ingestion failed");
+					return false;
+				});
+		}
+		return apiKey
+			? this.#ingestParsedUsageHeaders(provider, providerImpl, parsedReport, apiKey, options, now)
+			: false;
 	}
 
 	async #collectUsageRequests(options?: {
@@ -3759,6 +3964,10 @@ export class AuthStorage {
 	}
 
 	#getUsageReportIdentifiers(report: UsageReport): string[] {
+		const brokerCredentialId = readBrokerCredentialIdMetadata((report.metadata ?? {}) as Record<string, unknown>);
+		if (brokerCredentialId !== undefined) {
+			return [`${report.provider}:broker-credential:${brokerCredentialId}`];
+		}
 		const identifiers: string[] = [];
 		const email = this.#getUsageReportMetadataValue(report, "email");
 		if (email) identifiers.push(`email:${email.toLowerCase()}`);
@@ -3943,6 +4152,16 @@ export class AuthStorage {
 		}
 		const usageCredential = this.#buildUsageCredential(credential);
 		if (credential.type === "api_key") {
+			if (options?.cachedOnly === true) {
+				const peekHook = this.#store.peekCachedUsageReport?.bind(this.#store);
+				if (peekHook) {
+					try {
+						return peekHook(provider, credential);
+					} catch {
+						return null;
+					}
+				}
+			}
 			const resolvedApiKey = await this.#configValueResolver(credential.key);
 			if (!resolvedApiKey) return null;
 			usageCredential.apiKey = resolvedApiKey;
@@ -4226,9 +4445,7 @@ export class AuthStorage {
 			? Math.max(0, Math.min(1, options.reserveFraction))
 			: 0;
 		const nowMs = Date.now();
-		const peekReport = (
-			this.#store as unknown as { peekCachedUsageReport?: (p: Provider, c: OAuthCredential) => UsageReport | null }
-		).peekCachedUsageReport?.bind(this.#store);
+		const peekReport = this.#store.peekCachedUsageReport?.bind(this.#store);
 		let accounts: ModelUsageAccountHealth[] = pool.map(({ entry, index }) => {
 			const credentialType = entry.credential.type;
 			const oauthCredential = entry.credential.type === "oauth" ? entry.credential : undefined;
@@ -4248,7 +4465,7 @@ export class AuthStorage {
 				};
 			}
 			let report: UsageReport | null = null;
-			if (entry.credential.type === "oauth" && peekReport) {
+			if (peekReport) {
 				try {
 					report = peekReport(provider, entry.credential);
 				} catch {
@@ -6843,6 +7060,76 @@ export class AuthStorage {
 			}
 		}
 		return { generation: this.#generation, generatedAt: Date.now(), credentials: entries };
+	}
+
+	/**
+	 * Broker-host ingest for a sanitized header-derived usage report. Resolves the
+	 * stored credential by id, writes through the canonical per-credential usage
+	 * cache, and bounds lifetime to the provider's header TTL.
+	 */
+	ingestHeaderUsageReport(credentialId: number, report: UsageReport): boolean {
+		let stored: StoredCredential | undefined;
+		let provider: Provider | undefined;
+		for (const [providerId, entries] of this.#data) {
+			const match = entries.find(entry => entry.id === credentialId);
+			if (match) {
+				stored = match;
+				provider = providerId as Provider;
+				break;
+			}
+		}
+		if (!stored || !provider) return false;
+		if (report.provider !== provider) return false;
+		const providerImpl = this.#resolveUsageProvider(provider);
+		if (!providerImpl) return false;
+		const headerTtlMs = providerImpl.headerReportTtlMs;
+		if (headerTtlMs === undefined || !Number.isFinite(headerTtlMs) || headerTtlMs <= 0) return false;
+
+		const now = Date.now();
+		const usageCredential = this.#buildUsageCredential(stored.credential);
+		const cacheKey = this.#buildUsageReportCacheKey(this.#buildUsageRequest(provider, usageCredential));
+		const priorEntry = this.#usageCache.getStale<UsageReport | null>(cacheKey);
+		const prior = priorEntry?.value;
+		const taggedReport: UsageReport = {
+			...report,
+			metadata: {
+				...(report.metadata ?? {}),
+				[BROKER_CREDENTIAL_ID_METADATA_KEY]: credentialId,
+			},
+		};
+		let merged = taggedReport;
+		if (prior && Array.isArray(prior.limits)) {
+			const headerLimitsById = new Map(report.limits.map(limit => [limit.id, limit]));
+			const limits: UsageLimit[] = [];
+			for (const limit of prior.limits) {
+				const replacement = headerLimitsById.get(limit.id);
+				if (replacement) {
+					limits.push(replacement);
+					headerLimitsById.delete(limit.id);
+				} else {
+					limits.push(limit);
+				}
+			}
+			for (const limit of headerLimitsById.values()) {
+				limits.push(limit);
+			}
+			merged = {
+				...prior,
+				fetchedAt: now,
+				limits,
+				metadata: {
+					...(taggedReport.metadata ?? {}),
+					...(prior.metadata ?? {}),
+					[BROKER_CREDENTIAL_ID_METADATA_KEY]: credentialId,
+					source: taggedReport.metadata?.source ?? prior.metadata?.source,
+					headersUpdatedAt: now,
+				},
+			};
+		}
+		const expiresAt = now + headerTtlMs;
+		this.#usageCache.set(cacheKey, { value: merged, expiresAt });
+		this.#usageHeaderIngestAt.set(cacheKey, now);
+		return true;
 	}
 
 	/**

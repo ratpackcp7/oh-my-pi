@@ -119,6 +119,8 @@ const schemaNames = [
 	"credentialBlockResponseSchema",
 	"credentialBlocksDeleteResponseSchema",
 	"usageStaleResponseSchema",
+	"usageLimitReportRequestSchema",
+	"usageLimitReportResponseSchema",
 	"credentialUploadRequestSchema",
 	"credentialUploadResponseSchema",
 ] as const;
@@ -190,6 +192,11 @@ const validSamples: Record<SchemaName, unknown> = {
 	credentialBlockResponseSchema: { ok: true },
 	credentialBlocksDeleteResponseSchema: { ok: true },
 	usageStaleResponseSchema: { ok: true },
+	usageLimitReportRequestSchema: {
+		credentialId: 7,
+		report: { provider: "meta", fetchedAt: 2_000, limits: USAGE_REPORT.limits },
+	},
+	usageLimitReportResponseSchema: { ok: true },
 	credentialUploadRequestSchema: { provider: "anthropic", credential: REAL_OAUTH },
 	credentialUploadResponseSchema: { entries: [CREDENTIAL_ENTRY] },
 };
