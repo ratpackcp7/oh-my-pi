@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { type AuthCredentialStore, AuthStorage, type StoredAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import { type AuthCredentialStore, AuthStorage, type StoredAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import { SessionStatsTracker } from "../src/session/session-stats";
 
 interface CacheEntry {

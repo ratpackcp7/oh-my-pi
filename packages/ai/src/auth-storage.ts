@@ -3964,9 +3964,7 @@ export class AuthStorage {
 	}
 
 	#getUsageReportIdentifiers(report: UsageReport): string[] {
-		const brokerCredentialId = readBrokerCredentialIdMetadata(
-			(report.metadata ?? {}) as Record<string, unknown>,
-		);
+		const brokerCredentialId = readBrokerCredentialIdMetadata((report.metadata ?? {}) as Record<string, unknown>);
 		if (brokerCredentialId !== undefined) {
 			return [`${report.provider}:broker-credential:${brokerCredentialId}`];
 		}

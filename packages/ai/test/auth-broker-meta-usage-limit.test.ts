@@ -136,16 +136,14 @@ describe("auth-broker Meta usage limit durability", () => {
 		const storageA = new AuthStorage(remoteA);
 		await storageA.reload();
 		const sessionKey = await storageA.getApiKey("meta", "session-a");
-		const credA = remoteA.listAuthCredentials("meta").find(
-			entry => entry.credential.type === "api_key" && entry.credential.key === sessionKey,
-		);
+		const credA = remoteA
+			.listAuthCredentials("meta")
+			.find(entry => entry.credential.type === "api_key" && entry.credential.key === sessionKey);
 		expect(credA).toBeDefined();
-		if (!credA || credA.credential.type !== "api_key") throw new Error("expected Meta API-key fixture");
+		if (credA?.credential.type !== "api_key") throw new Error("expected Meta API-key fixture");
 
 		const ingestSpy = vi.spyOn(brokerClientA, "ingestUsageLimitReport");
-		expect(
-			await storageA.ingestUsageHeaders("meta", rateLimitHeaders(800), { sessionId: "session-a" }),
-		).toBe(true);
+		expect(await storageA.ingestUsageHeaders("meta", rateLimitHeaders(800), { sessionId: "session-a" })).toBe(true);
 		expect(ingestSpy).toHaveBeenCalledTimes(1);
 		const posted = ingestSpy.mock.calls[0]![0]!;
 		expect(posted.credentialId).toBe(credA.id);
@@ -166,9 +164,7 @@ describe("auth-broker Meta usage limit durability", () => {
 		const brokerUsage = await fetch(`${handle!.url}/v1/usage`, {
 			headers: { Authorization: `Bearer ${TOKEN}` },
 		}).then(response => response.json() as Promise<{ reports: UsageReport[] }>);
-		const brokerReport = brokerUsage.reports.find(
-			report => report.limits[0]?.amount.remainingFraction === 0.8,
-		);
+		const brokerReport = brokerUsage.reports.find(report => report.limits[0]?.amount.remainingFraction === 0.8);
 		expect(brokerReport?.metadata?.brokerCredentialId).toBe(credA.id);
 		expect(JSON.stringify(brokerUsage)).not.toContain(SYNTHETIC_META_KEY_A);
 		expect(JSON.stringify(brokerUsage)).not.toContain(SYNTHETIC_META_KEY_B);
@@ -197,9 +193,9 @@ describe("auth-broker Meta usage limit durability", () => {
 			}),
 		).resolves.toMatchObject({ status: 401 });
 
-		await expect(
-			client.ingestUsageLimitReport({ credentialId: 99_999, report }),
-		).rejects.toBeInstanceOf(AuthBrokerError);
+		await expect(client.ingestUsageLimitReport({ credentialId: 99_999, report })).rejects.toBeInstanceOf(
+			AuthBrokerError,
+		);
 
 		await expect(
 			client.ingestUsageLimitReport({
@@ -250,13 +246,21 @@ describe("auth-broker Meta usage limit durability", () => {
 
 		const storageA = new AuthStorage(remoteA);
 		await storageA.reload();
-		const credA = metaRows.find(entry => entry.credential.type === "api_key" && entry.credential.key === SYNTHETIC_META_KEY_A);
-		const credB = metaRows.find(entry => entry.credential.type === "api_key" && entry.credential.key === SYNTHETIC_META_KEY_B);
+		const credA = metaRows.find(
+			entry => entry.credential.type === "api_key" && entry.credential.key === SYNTHETIC_META_KEY_A,
+		);
+		const credB = metaRows.find(
+			entry => entry.credential.type === "api_key" && entry.credential.key === SYNTHETIC_META_KEY_B,
+		);
 		expect(credA).toBeDefined();
 		expect(credB).toBeDefined();
-		if (!credA || credA.credential.type !== "api_key") throw new Error("missing cred A");
-		if (!credB || credB.credential.type !== "api_key") throw new Error("missing cred B");
-		const { sessionA, sessionB } = await assignDistinctMetaSessions(storageA, credA.credential.key, credB.credential.key);
+		if (credA?.credential.type !== "api_key") throw new Error("missing cred A");
+		if (credB?.credential.type !== "api_key") throw new Error("missing cred B");
+		const { sessionA, sessionB } = await assignDistinctMetaSessions(
+			storageA,
+			credA.credential.key,
+			credB.credential.key,
+		);
 		const sessionForCredA =
 			(await storageA.getApiKey("meta", sessionA)) === credA.credential.key ? sessionA : sessionB;
 		const sessionForCredB = sessionForCredA === sessionA ? sessionB : sessionA;
@@ -317,9 +321,9 @@ describe("auth-broker Meta usage limit durability", () => {
 		const storageClient = new AuthStorage(remote);
 		await storageClient.reload();
 		const selectedKey = await storageClient.getApiKey("meta", "session");
-		expect(
-			await storageClient.ingestUsageHeaders("meta", rateLimitHeaders(600), { sessionId: "session" }),
-		).toBe(true);
+		expect(await storageClient.ingestUsageHeaders("meta", rateLimitHeaders(600), { sessionId: "session" })).toBe(
+			true,
+		);
 		const peek = remote.peekCachedUsageReport("meta", {
 			type: "api_key",
 			key: selectedKey,

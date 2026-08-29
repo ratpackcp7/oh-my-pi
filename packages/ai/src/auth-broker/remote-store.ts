@@ -1263,11 +1263,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return overlay;
 	}
 
-	#peekBrokerUsageReportForCredential(
-		provider: Provider,
-		credentialId: number,
-		ttlMs: number,
-	): UsageReport | null {
+	#peekBrokerUsageReportForCredential(provider: Provider, credentialId: number, ttlMs: number): UsageReport | null {
 		const cached = this.#usageCache;
 		if (!cached || Date.now() - cached.fetchedAt >= USAGE_CACHE_TTL_MS || cached.reports === null) {
 			return null;
