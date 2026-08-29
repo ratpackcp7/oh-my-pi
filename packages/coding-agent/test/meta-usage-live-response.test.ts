@@ -53,23 +53,20 @@ describe("Meta usage live response ingest", () => {
 		storages.push(storage);
 
 		const tracker = new SessionStatsTracker({
-			session: { messages: [] },
-			agent: {
-				sessionId: "live-response-session",
-				state: { messages: [] },
-				tokenizer: { countMessages: () => 0 },
-			},
+			session: {} as never,
+			agent: { sessionId: "live-response-session" } as never,
 			sessionManager: {} as never,
 			modelRegistry: {
 				authStorage: storage,
 				getProviderBaseUrl: () => "https://api.meta.ai/v1",
-			},
+			} as never,
 			model: () => undefined,
 			sessionId: () => "live-response-session",
 		});
 
 		const model = { provider: "meta", id: "muse-spark-1.2" } as Model;
 		const response: ProviderResponseMetadata = {
+			status: 200,
 			headers: {
 				"x-ratelimit-limit-tokens": "1000",
 				"x-ratelimit-remaining-tokens": "700",

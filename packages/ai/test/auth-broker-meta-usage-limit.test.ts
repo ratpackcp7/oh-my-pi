@@ -321,6 +321,8 @@ describe("auth-broker Meta usage limit durability", () => {
 		const storageClient = new AuthStorage(remote);
 		await storageClient.reload();
 		const selectedKey = await storageClient.getApiKey("meta", "session");
+		expect(selectedKey).toBeDefined();
+		if (!selectedKey) throw new Error("expected selected Meta API key");
 		expect(await storageClient.ingestUsageHeaders("meta", rateLimitHeaders(600), { sessionId: "session" })).toBe(
 			true,
 		);
