@@ -975,6 +975,8 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 
 	test("keeps Meta API-key header overlays isolated by credential", async () => {
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const credA = { type: "api_key" as const, key: "meta-key-a", source: "login" as const };
+		const credB = { type: "api_key" as const, key: "meta-key-b", source: "login" as const };
 		const remoteStore = new RemoteAuthCredentialStore({
 			client: brokerClient,
 			initialSnapshot: {
@@ -982,13 +984,15 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 				generatedAt: 0,
 				serverNowMs: 0,
 				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
-				credentials: [],
+				credentials: [
+					{ id: 101, provider: "meta", credential: credA, identityKey: null, rotatesInMs: null },
+					{ id: 102, provider: "meta", credential: credB, identityKey: null, rotatesInMs: null },
+				],
 			},
 		});
 		const now = Date.now();
 		const fetchSpy = vi.spyOn(brokerClient, "fetchUsage").mockResolvedValue({ generatedAt: now, reports: [] });
-		const credA = { type: "api_key" as const, key: "meta-key-a", source: "login" as const };
-		const credB = { type: "api_key" as const, key: "meta-key-b", source: "login" as const };
+		const publishSpy = vi.spyOn(brokerClient, "ingestUsageLimitReport").mockResolvedValue({ ok: true });
 		const unrelatedOAuth = {
 			type: "oauth" as const,
 			access: "oauth-access",
@@ -1037,10 +1041,11 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		};
 
 		try {
-			expect(remoteStore.ingestUsageReport("meta", credA, exhausted)).toBe(true);
+			expect(await remoteStore.ingestUsageReport("meta", credA, exhausted)).toBe(true);
 			expect(await remoteStore.fetchUsageReports()).toHaveLength(1);
 			expect(remoteStore.peekCachedUsageReport("meta", unrelatedOAuth)).toBeNull();
-			expect(remoteStore.ingestUsageReport("meta", credB, healthy)).toBe(true);
+			expect(await remoteStore.ingestUsageReport("meta", credB, healthy)).toBe(true);
+			expect(publishSpy).toHaveBeenCalledTimes(2);
 			expect(remoteStore.peekCachedUsageReport("meta", credA)?.limits[0]?.status).toBe("exhausted");
 			expect(remoteStore.peekCachedUsageReport("meta", credB)?.limits[0]?.amount.remainingFraction).toBe(0.8);
 
