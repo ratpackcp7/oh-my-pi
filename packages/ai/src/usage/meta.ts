@@ -86,7 +86,7 @@ function buildSubscriptionWindowLimit(window: Record<string, unknown>): UsageLim
 	const usedPercent = readPercentUsed(window.used_percent);
 	const durationMins = readPositiveMinutes(window.window_duration_mins);
 	const resetsAt = parseIsoTimestamp(window.resets_at);
-	if (usedPercent === undefined || durationMins === undefined) return null;
+	if (usedPercent === undefined || durationMins === undefined || resetsAt === undefined) return null;
 	const amount = normalizePercentAmount(usedPercent);
 	const durationMs = durationMins * MINUTE_MS;
 	return {
@@ -111,7 +111,7 @@ function buildSubscriptionWindowLimit(window: Record<string, unknown>): UsageLim
 function buildSubscriptionWeeklyLimit(weekly: Record<string, unknown>): UsageLimit | null {
 	const usedPercent = readPercentUsed(weekly.used_percent);
 	const resetsAt = parseIsoTimestamp(weekly.resets_at);
-	if (usedPercent === undefined) return null;
+	if (usedPercent === undefined || resetsAt === undefined) return null;
 	const amount = normalizePercentAmount(usedPercent);
 	return {
 		id: META_SUBSCRIPTION_WEEKLY_LIMIT_ID,

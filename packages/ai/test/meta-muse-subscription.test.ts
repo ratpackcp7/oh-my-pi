@@ -81,19 +81,27 @@ function makeStore(rows: StoredAuthCredential[]): AuthCredentialStore {
 function subscriptionEvent(overrides?: {
 	windowUsedPercent?: number;
 	windowDurationMins?: number;
+	windowResetsAt?: string | null;
 	weeklyUsedPercent?: number;
+	weeklyResetsAt?: string | null;
 }): Record<string, unknown> {
+	const window: Record<string, unknown> = {
+		used_percent: overrides?.windowUsedPercent ?? 25,
+		window_duration_mins: overrides?.windowDurationMins ?? 300,
+	};
+	if (overrides?.windowResetsAt !== null) {
+		window.resets_at = overrides?.windowResetsAt ?? WINDOW_RESET;
+	}
+	const weekly: Record<string, unknown> = {
+		used_percent: overrides?.weeklyUsedPercent ?? 10,
+	};
+	if (overrides?.weeklyResetsAt !== null) {
+		weekly.resets_at = overrides?.weeklyResetsAt ?? WEEKLY_RESET;
+	}
 	return {
 		type: "response.subscription_usage",
-		window: {
-			used_percent: overrides?.windowUsedPercent ?? 25,
-			window_duration_mins: overrides?.windowDurationMins ?? 300,
-			resets_at: WINDOW_RESET,
-		},
-		weekly: {
-			used_percent: overrides?.weeklyUsedPercent ?? 10,
-			resets_at: WEEKLY_RESET,
-		},
+		window,
+		weekly,
 	};
 }
 
@@ -393,6 +401,22 @@ describe("Meta Muse subscription usage parsing", () => {
 
 	it("rejects zero window_duration_mins", () => {
 		expect(parseMetaSubscriptionUsage(subscriptionEvent({ windowDurationMins: 0 }))).toBeNull();
+	});
+
+	it("rejects missing rolling resets_at", () => {
+		expect(parseMetaSubscriptionUsage(subscriptionEvent({ windowResetsAt: null }))).toBeNull();
+	});
+
+	it("rejects invalid rolling resets_at", () => {
+		expect(parseMetaSubscriptionUsage(subscriptionEvent({ windowResetsAt: "not-a-date" }))).toBeNull();
+	});
+
+	it("rejects missing weekly resets_at", () => {
+		expect(parseMetaSubscriptionUsage(subscriptionEvent({ weeklyResetsAt: null }))).toBeNull();
+	});
+
+	it("rejects invalid weekly resets_at", () => {
+		expect(parseMetaSubscriptionUsage(subscriptionEvent({ weeklyResetsAt: "not-a-date" }))).toBeNull();
 	});
 
 	it("preserves dynamic window duration", () => {
@@ -738,6 +762,66 @@ describe("Meta Muse subscription per-limit fail-closed routing", () => {
 			cachedOnly: true,
 		});
 		expect(health.state).toBe("depleted");
+		storage.close();
+	});
+
+	it("invalid reset timestamp does not clear an unexpired exhausted limit", async () => {
+		let now = T0_MS;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const storage = await makeSubscriptionStorage();
+		expect(
+			storage.ingestUsageSubscriptionEvent(
+				"meta",
+				subscriptionEvent({ windowUsedPercent: 100, weeklyUsedPercent: 10 }),
+			),
+		).toBe(true);
+		expect(
+			storage.ingestUsageSubscriptionEvent(
+				"meta",
+				subscriptionEvent({ windowUsedPercent: 0, weeklyUsedPercent: 0, windowResetsAt: "not-a-date" }),
+			),
+		).toBe(false);
+
+		now = T0_MS + 30_000;
+		const health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("depleted");
+		storage.close();
+	});
+
+	it("valid newer subscription snapshot replaces exhausted state and restores headroom", async () => {
+		let now = T0_MS;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const storage = await makeSubscriptionStorage();
+		expect(
+			storage.ingestUsageSubscriptionEvent(
+				"meta",
+				subscriptionEvent({ windowUsedPercent: 100, weeklyUsedPercent: 10 }),
+			),
+		).toBe(true);
+		let health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("depleted");
+
+		now = T0_MS + 1_000;
+		expect(
+			storage.ingestUsageSubscriptionEvent(
+				"meta",
+				subscriptionEvent({ windowUsedPercent: 25, weeklyUsedPercent: 10 }),
+			),
+		).toBe(true);
+		health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("healthy");
 		storage.close();
 	});
 

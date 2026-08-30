@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Meta Muse subscription usage rejects snapshots with missing or unparsable `resets_at` timestamps so malformed events cannot replace authoritative exhausted limits.
 - Meta Muse subscription usage now resolves broker OAuth credentials by hashed identity material (skipping remote refresh sentinels) and retains each subscription limit until its own provider-reported reset instead of failing open after one minute.
 
 - Added provider-authoritative Meta Model API per-minute headroom to usage reports and routing when response headers are available.
