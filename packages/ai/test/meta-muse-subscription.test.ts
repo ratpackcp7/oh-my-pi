@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
 	type AuthCredentialStore,
 	AuthStorage,
+	type OAuthCredential,
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
@@ -28,6 +29,7 @@ import {
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { readBrokerCredentialIdMetadata } from "@oh-my-pi/pi-ai/usage";
 import {
 	META_SUBSCRIPTION_WEEKLY_LIMIT_ID,
 	META_SUBSCRIPTION_WINDOW_LIMIT_ID,
@@ -39,10 +41,15 @@ import { removeWithRetries } from "../../utils/src/temp";
 const SYNTHETIC_IDENTITY_TOKEN = "synthetic-meta-identity-token-aa11";
 const SYNTHETIC_MINTED_KEY = "synthetic-meta-minted-key-bb22";
 const SYNTHETIC_PAYG_KEY = "synthetic-meta-payg-key-cc33";
+const SYNTHETIC_IDENTITY_TOKEN_B = "synthetic-meta-identity-token-dd44";
+const SYNTHETIC_MINTED_KEY_B = "synthetic-meta-minted-key-ee55";
 const BROKER_TOKEN = "meta-muse-subscription-broker-token";
 
+const T0_MS = Date.parse("2026-08-29T12:00:00.000Z");
 const WINDOW_RESET = "2026-09-01T12:00:00.000Z";
 const WEEKLY_RESET = "2026-09-05T18:30:00.000Z";
+const WINDOW_RESET_MS = Date.parse(WINDOW_RESET);
+const WEEKLY_RESET_MS = Date.parse(WEEKLY_RESET);
 
 interface CacheEntry {
 	value: string;
@@ -416,6 +423,10 @@ describe("Meta Muse subscription usage parsing", () => {
 		expect(windows.primary?.id).toBe(META_SUBSCRIPTION_WINDOW_LIMIT_ID);
 		expect(windows.secondary?.id).toBe(META_SUBSCRIPTION_WEEKLY_LIMIT_ID);
 	});
+
+	it("weekly ranking fallback uses weekly scale, not one minute", () => {
+		expect(metaRankingStrategy.windowDefaults.secondaryMs).toBe(7 * 24 * 60 * 60_000);
+	});
 });
 
 describe("Meta Muse subscription usage ingest isolation", () => {
@@ -566,6 +577,476 @@ describe("Meta Muse subscription usage ingest isolation", () => {
 			}).then(response => response.json() as Promise<{ reports: UsageReport[] }>);
 			expect(JSON.stringify(wire)).not.toContain(SYNTHETIC_IDENTITY_TOKEN);
 			expect(JSON.stringify(wire)).not.toContain(SYNTHETIC_MINTED_KEY);
+			remoteB.close();
+			storageB.close();
+		} finally {
+			if (previousMetaEnv === undefined) delete process.env.META_API_KEY;
+			else process.env.META_API_KEY = previousMetaEnv;
+			if (previousModelEnv === undefined) delete process.env.MODEL_API_KEY;
+			else process.env.MODEL_API_KEY = previousModelEnv;
+		}
+	});
+});
+
+describe("Meta Muse subscription per-limit fail-closed routing", () => {
+	const previousMetaEnv = process.env.META_API_KEY;
+	const previousModelEnv = process.env.MODEL_API_KEY;
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		if (previousMetaEnv === undefined) delete process.env.META_API_KEY;
+		else process.env.META_API_KEY = previousMetaEnv;
+		if (previousModelEnv === undefined) delete process.env.MODEL_API_KEY;
+		else process.env.MODEL_API_KEY = previousModelEnv;
+	});
+
+	async function makeSubscriptionStorage(): Promise<AuthStorage> {
+		delete process.env.META_API_KEY;
+		delete process.env.MODEL_API_KEY;
+		const storage = new AuthStorage(
+			makeStore([
+				{
+					id: 1,
+					provider: "meta",
+					credential: {
+						type: "oauth",
+						access: SYNTHETIC_MINTED_KEY,
+						refresh: SYNTHETIC_IDENTITY_TOKEN,
+						expires: Date.now() + 60_000,
+					},
+					disabledCause: null,
+				},
+			]),
+			{ refreshOAuthCredential: noopMetaRefresh },
+		);
+		await storage.reload();
+		return storage;
+	}
+
+	it("exhausted rolling still blocks after 61 seconds until rolling reset", async () => {
+		let now = T0_MS;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const storage = await makeSubscriptionStorage();
+		expect(
+			storage.ingestUsageSubscriptionEvent(
+				"meta",
+				subscriptionEvent({ windowUsedPercent: 100, weeklyUsedPercent: 10 }),
+			),
+		).toBe(true);
+		let health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("depleted");
+
+		now = T0_MS + 61_000;
+		health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("depleted");
+		storage.close();
+	});
+
+	it("rolling reset clears rolling block while weekly state remains", async () => {
+		let now = T0_MS;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const storage = await makeSubscriptionStorage();
+		expect(
+			storage.ingestUsageSubscriptionEvent(
+				"meta",
+				subscriptionEvent({ windowUsedPercent: 100, weeklyUsedPercent: 10 }),
+			),
+		).toBe(true);
+
+		now = WINDOW_RESET_MS + 1;
+		const health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("healthy");
+		const reports = await storage.fetchUsageReports();
+		expect(
+			reports?.[0]?.limits.find(limit => limit.id === META_SUBSCRIPTION_WEEKLY_LIMIT_ID)?.amount.remainingFraction,
+		).toBeCloseTo(0.9);
+		storage.close();
+	});
+
+	it("exhausted weekly survives rolling reset and blocks until weekly reset", async () => {
+		let now = T0_MS;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const storage = await makeSubscriptionStorage();
+		expect(
+			storage.ingestUsageSubscriptionEvent(
+				"meta",
+				subscriptionEvent({ windowUsedPercent: 25, weeklyUsedPercent: 100 }),
+			),
+		).toBe(true);
+
+		now = WINDOW_RESET_MS + 1;
+		const health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("depleted");
+		storage.close();
+	});
+
+	it("weekly reset clears weekly block", async () => {
+		let now = T0_MS;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const storage = await makeSubscriptionStorage();
+		expect(
+			storage.ingestUsageSubscriptionEvent(
+				"meta",
+				subscriptionEvent({ windowUsedPercent: 25, weeklyUsedPercent: 100 }),
+			),
+		).toBe(true);
+
+		now = WEEKLY_RESET_MS + 1;
+		const health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).not.toBe("depleted");
+		storage.close();
+	});
+
+	it("malformed subscription event does not clear an unexpired exhausted limit", async () => {
+		let now = T0_MS;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const storage = await makeSubscriptionStorage();
+		expect(
+			storage.ingestUsageSubscriptionEvent(
+				"meta",
+				subscriptionEvent({ windowUsedPercent: 100, weeklyUsedPercent: 10 }),
+			),
+		).toBe(true);
+		expect(storage.ingestUsageSubscriptionEvent("meta", { type: "response.subscription_usage", window: {} })).toBe(
+			false,
+		);
+
+		now = T0_MS + 30_000;
+		const health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("depleted");
+		storage.close();
+	});
+
+	it("PAYG header usage is stale after the existing 60 second TTL", async () => {
+		let now = T0_MS;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const storage = new AuthStorage(
+			makeStore([
+				{
+					id: 2,
+					provider: "meta",
+					credential: { type: "api_key", key: SYNTHETIC_PAYG_KEY, source: "login" },
+					disabledCause: null,
+				},
+			]),
+		);
+		await storage.reload();
+		await storage.getApiKey("meta", "payg-session");
+		expect(
+			await storage.ingestUsageHeaders(
+				"meta",
+				{
+					"x-ratelimit-limit-tokens": "1000",
+					"x-ratelimit-remaining-tokens": "500",
+					"x-ratelimit-limit-requests": "100",
+					"x-ratelimit-remaining-requests": "50",
+				},
+				{ sessionId: "payg-session" },
+			),
+		).toBe(true);
+		let health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("healthy");
+
+		now = T0_MS + 60_001;
+		health = await storage.getModelUsageHealth("meta", {
+			modelId: "muse-spark-1.2",
+			reserveFraction: 0.1,
+			cachedOnly: true,
+		});
+		expect(health.state).toBe("unknown");
+		storage.close();
+	});
+});
+
+describe("Meta Muse broker OAuth credential attribution", () => {
+	let tempDir = "";
+	let store: SqliteAuthCredentialStore | undefined;
+	let storage: AuthStorage | undefined;
+	let handle: AuthBrokerServerHandle | undefined;
+
+	async function startTwoOAuthBroker(
+		first: { access: string; refresh: string },
+		second: { access: string; refresh: string },
+	): Promise<void> {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "meta-muse-oauth-attr-"));
+		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		store.upsertAuthCredentialForProvider("meta", {
+			type: "oauth",
+			access: first.access,
+			refresh: first.refresh,
+			expires: Date.now() + META_MINTED_KEY_TTL_MS,
+		});
+		store.upsertAuthCredentialForProvider("meta", {
+			type: "oauth",
+			access: second.access,
+			refresh: second.refresh,
+			expires: Date.now() + META_MINTED_KEY_TTL_MS,
+		});
+		storage = new AuthStorage(store, { refreshOAuthCredential: noopMetaRefresh });
+		await storage.reload();
+		handle = startAuthBroker({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [BROKER_TOKEN],
+			disableRefresher: true,
+		});
+	}
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		storage?.close();
+		store?.close();
+		await handle?.close();
+		if (tempDir) await removeWithRetries(tempDir);
+	});
+
+	async function assignDistinctOAuthSessions(
+		remoteStorage: AuthStorage,
+		accessA: string,
+		accessB: string,
+	): Promise<{ sessionA: string; sessionB: string; credAId: number; credBId: number }> {
+		const rows = remoteStorage.exportSnapshot().credentials.filter(entry => entry.provider === "meta");
+		const credA = rows.find(entry => entry.credential.type === "oauth" && entry.credential.access === accessA);
+		const credB = rows.find(entry => entry.credential.type === "oauth" && entry.credential.access === accessB);
+		if (!credA || !credB) throw new Error("missing oauth fixture rows");
+		return { sessionA: "session-a", sessionB: "session-b", credAId: credA.id, credBId: credB.id };
+	}
+
+	async function ingestForSessions(
+		remote: RemoteAuthCredentialStore,
+		brokerClient: AuthBrokerClient,
+		sessions: { credAId: number; credBId: number },
+		credentialA: OAuthCredential,
+		credentialB: OAuthCredential,
+		windowUsedPercentA: number,
+		windowUsedPercentB: number,
+	): Promise<void> {
+		const ingestSpy = vi.spyOn(brokerClient, "ingestUsageLimitReport");
+		const reportA = parseMetaSubscriptionUsage(subscriptionEvent({ windowUsedPercent: windowUsedPercentA }), T0_MS);
+		const reportB = parseMetaSubscriptionUsage(subscriptionEvent({ windowUsedPercent: windowUsedPercentB }), T0_MS);
+		if (!reportA || !reportB) throw new Error("expected subscription report fixtures");
+		expect(await remote.ingestUsageReport("meta", credentialA, reportA)).toBe(true);
+		expect(await remote.ingestUsageReport("meta", credentialB, reportB)).toBe(true);
+		expect(ingestSpy).toHaveBeenCalledTimes(2);
+		const postedA = ingestSpy.mock.calls.find(call => call[0]!.credentialId === sessions.credAId)?.[0];
+		const postedB = ingestSpy.mock.calls.find(call => call[0]!.credentialId === sessions.credBId)?.[0];
+		expect(postedA?.credentialId).toBe(sessions.credAId);
+		expect(postedB?.credentialId).toBe(sessions.credBId);
+		expect(postedA?.report.limits[0]?.amount.used).toBe(windowUsedPercentA);
+		expect(postedB?.report.limits[0]?.amount.used).toBe(windowUsedPercentB);
+		expect(JSON.stringify(ingestSpy.mock.calls)).not.toContain(SYNTHETIC_IDENTITY_TOKEN);
+		expect(JSON.stringify(ingestSpy.mock.calls)).not.toContain(SYNTHETIC_IDENTITY_TOKEN_B);
+	}
+
+	it("attributes subscription snapshots to the matching OAuth credential without human identity metadata", async () => {
+		const previousMetaEnv = process.env.META_API_KEY;
+		const previousModelEnv = process.env.MODEL_API_KEY;
+		delete process.env.META_API_KEY;
+		delete process.env.MODEL_API_KEY;
+		try {
+			await startTwoOAuthBroker(
+				{ access: SYNTHETIC_MINTED_KEY, refresh: SYNTHETIC_IDENTITY_TOKEN },
+				{ access: SYNTHETIC_MINTED_KEY_B, refresh: SYNTHETIC_IDENTITY_TOKEN_B },
+			);
+			const clientA = new AuthBrokerClient({ url: handle!.url, token: BROKER_TOKEN });
+			const remoteA = new RemoteAuthCredentialStore({ client: clientA, streamSnapshots: false });
+			await remoteA.refreshSnapshot();
+			const storageA = new AuthStorage(remoteA, { refreshOAuthCredential: noopMetaRefresh });
+			await storageA.reload();
+			const rows = remoteA.listAuthCredentials("meta");
+			const credentialA = rows.find(
+				entry => entry.credential.type === "oauth" && entry.credential.access === SYNTHETIC_MINTED_KEY,
+			)?.credential;
+			const credentialB = rows.find(
+				entry => entry.credential.type === "oauth" && entry.credential.access === SYNTHETIC_MINTED_KEY_B,
+			)?.credential;
+			if (credentialA?.type !== "oauth" || credentialB?.type !== "oauth") {
+				throw new Error("expected two oauth credentials");
+			}
+			const sessions = await assignDistinctOAuthSessions(storageA, SYNTHETIC_MINTED_KEY, SYNTHETIC_MINTED_KEY_B);
+			await ingestForSessions(remoteA, clientA, sessions, credentialA, credentialB, 40, 80);
+
+			const clientB = new AuthBrokerClient({ url: handle!.url, token: BROKER_TOKEN });
+			const remoteB = new RemoteAuthCredentialStore({ client: clientB, streamSnapshots: false });
+			await remoteB.refreshSnapshot();
+			const storageB = new AuthStorage(remoteB);
+			await storageB.reload();
+			const reports = (await storageB.fetchUsageReports()) ?? [];
+			const reportA = reports.find(
+				report =>
+					readBrokerCredentialIdMetadata((report.metadata ?? {}) as Record<string, unknown>) === sessions.credAId,
+			);
+			const reportB = reports.find(
+				report =>
+					readBrokerCredentialIdMetadata((report.metadata ?? {}) as Record<string, unknown>) === sessions.credBId,
+			);
+			expect(reportA?.limits[0]?.amount.used).toBe(40);
+			expect(reportB?.limits[0]?.amount.used).toBe(80);
+			remoteA.close();
+			remoteB.close();
+			storageA.close();
+			storageB.close();
+		} finally {
+			if (previousMetaEnv === undefined) delete process.env.META_API_KEY;
+			else process.env.META_API_KEY = previousMetaEnv;
+			if (previousModelEnv === undefined) delete process.env.MODEL_API_KEY;
+			else process.env.MODEL_API_KEY = previousModelEnv;
+		}
+	});
+
+	it("does not change OAuth attribution when credential row order is reversed", async () => {
+		const previousMetaEnv = process.env.META_API_KEY;
+		const previousModelEnv = process.env.MODEL_API_KEY;
+		delete process.env.META_API_KEY;
+		delete process.env.MODEL_API_KEY;
+		try {
+			await startTwoOAuthBroker(
+				{ access: SYNTHETIC_MINTED_KEY_B, refresh: SYNTHETIC_IDENTITY_TOKEN_B },
+				{ access: SYNTHETIC_MINTED_KEY, refresh: SYNTHETIC_IDENTITY_TOKEN },
+			);
+			const clientA = new AuthBrokerClient({ url: handle!.url, token: BROKER_TOKEN });
+			const remoteA = new RemoteAuthCredentialStore({ client: clientA, streamSnapshots: false });
+			await remoteA.refreshSnapshot();
+			const storageA = new AuthStorage(remoteA, { refreshOAuthCredential: noopMetaRefresh });
+			await storageA.reload();
+			const rows = remoteA.listAuthCredentials("meta");
+			const credentialA = rows.find(
+				entry => entry.credential.type === "oauth" && entry.credential.access === SYNTHETIC_MINTED_KEY,
+			)?.credential;
+			const credentialB = rows.find(
+				entry => entry.credential.type === "oauth" && entry.credential.access === SYNTHETIC_MINTED_KEY_B,
+			)?.credential;
+			if (credentialA?.type !== "oauth" || credentialB?.type !== "oauth") {
+				throw new Error("expected two oauth credentials");
+			}
+			const sessions = await assignDistinctOAuthSessions(storageA, SYNTHETIC_MINTED_KEY, SYNTHETIC_MINTED_KEY_B);
+			await ingestForSessions(remoteA, clientA, sessions, credentialA, credentialB, 15, 65);
+			remoteA.close();
+			storageA.close();
+		} finally {
+			if (previousMetaEnv === undefined) delete process.env.META_API_KEY;
+			else process.env.META_API_KEY = previousMetaEnv;
+			if (previousModelEnv === undefined) delete process.env.MODEL_API_KEY;
+			else process.env.MODEL_API_KEY = previousModelEnv;
+		}
+	});
+
+	it("refuses broker publish for an unresolvable OAuth credential", async () => {
+		const previousMetaEnv = process.env.META_API_KEY;
+		const previousModelEnv = process.env.MODEL_API_KEY;
+		delete process.env.META_API_KEY;
+		delete process.env.MODEL_API_KEY;
+		try {
+			await startTwoOAuthBroker(
+				{ access: SYNTHETIC_MINTED_KEY, refresh: SYNTHETIC_IDENTITY_TOKEN },
+				{ access: SYNTHETIC_MINTED_KEY_B, refresh: SYNTHETIC_IDENTITY_TOKEN_B },
+			);
+			const client = new AuthBrokerClient({ url: handle!.url, token: BROKER_TOKEN });
+			const remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false });
+			await remote.refreshSnapshot();
+			const report = parseMetaSubscriptionUsage(subscriptionEvent({ windowUsedPercent: 55 }), T0_MS);
+			if (!report) throw new Error("expected subscription report fixture");
+			const published = await remote.ingestUsageReport(
+				"meta",
+				{
+					type: "oauth",
+					access: "orphan-minted-key",
+					refresh: "orphan-identity-token",
+					expires: Date.now() + META_MINTED_KEY_TTL_MS,
+				},
+				report,
+			);
+			expect(published).toBe(false);
+			remote.close();
+		} finally {
+			if (previousMetaEnv === undefined) delete process.env.META_API_KEY;
+			else process.env.META_API_KEY = previousMetaEnv;
+			if (previousModelEnv === undefined) delete process.env.MODEL_API_KEY;
+			else process.env.MODEL_API_KEY = previousModelEnv;
+		}
+	});
+
+	it("broker client B retains per-limit subscription state after client A ingest beyond 61 seconds", async () => {
+		let now = T0_MS;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const previousMetaEnv = process.env.META_API_KEY;
+		const previousModelEnv = process.env.MODEL_API_KEY;
+		delete process.env.META_API_KEY;
+		delete process.env.MODEL_API_KEY;
+		try {
+			tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "meta-muse-sub-broker-ttl-"));
+			store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+			store.upsertAuthCredentialForProvider("meta", {
+				type: "oauth",
+				access: SYNTHETIC_MINTED_KEY,
+				refresh: SYNTHETIC_IDENTITY_TOKEN,
+				expires: Date.now() + META_MINTED_KEY_TTL_MS,
+			});
+			storage = new AuthStorage(store, { refreshOAuthCredential: noopMetaRefresh });
+			await storage.reload();
+			handle = startAuthBroker({
+				storage,
+				bind: "127.0.0.1:0",
+				bearerTokens: [BROKER_TOKEN],
+				disableRefresher: true,
+			});
+
+			const clientA = new AuthBrokerClient({ url: handle.url, token: BROKER_TOKEN });
+			const remoteA = new RemoteAuthCredentialStore({ client: clientA, streamSnapshots: false });
+			await remoteA.refreshSnapshot();
+			const storageA = new AuthStorage(remoteA, { refreshOAuthCredential: noopMetaRefresh });
+			await storageA.reload();
+			expect(
+				await storageA.ingestUsageSubscriptionEvent(
+					"meta",
+					subscriptionEvent({ windowUsedPercent: 100, weeklyUsedPercent: 10 }),
+					{ sessionId: "broker-session" },
+				),
+			).toBe(true);
+			remoteA.close();
+			storageA.close();
+
+			now = T0_MS + 61_000;
+			const clientB = new AuthBrokerClient({ url: handle.url, token: BROKER_TOKEN });
+			const remoteB = new RemoteAuthCredentialStore({ client: clientB, streamSnapshots: false });
+			await remoteB.refreshSnapshot();
+			const storageB = new AuthStorage(remoteB);
+			await storageB.reload();
+			await storageB.fetchUsageReports();
+			const health = await storageB.getModelUsageHealth("meta", {
+				modelId: "muse-spark-1.2",
+				reserveFraction: 0.1,
+				cachedOnly: true,
+			});
+			expect(health.state).toBe("depleted");
 			remoteB.close();
 			storageB.close();
 		} finally {

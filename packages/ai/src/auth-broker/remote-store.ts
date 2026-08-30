@@ -24,7 +24,7 @@ import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
-import { readBrokerCredentialIdMetadata } from "../usage";
+import { isUsageReportCacheActive, readBrokerCredentialIdMetadata } from "../usage";
 import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
 import type {
 	CredentialBlockSnapshot,
@@ -187,6 +187,13 @@ function usageOverlayKey(
 	return undefined;
 }
 
+function oauthCredentialIdentityMaterial(credential: OAuthCredential): string | undefined {
+	const refresh = credential.refresh.trim();
+	if (refresh && refresh !== REMOTE_REFRESH_SENTINEL) return refresh;
+	const access = credential.access.trim();
+	return access || undefined;
+}
+
 function usageCredentialOverlayKey(provider: Provider, credential: AuthCredential): string | undefined {
 	if (credential.type === "api_key") {
 		const key = credential.key.trim();
@@ -197,7 +204,7 @@ function usageCredentialOverlayKey(provider: Provider, credential: AuthCredentia
 	const keyed = usageOverlayKey(provider, credential);
 	if (keyed) return keyed;
 	if (credential.type !== "oauth") return undefined;
-	const identity = credential.refresh.trim() || credential.access.trim();
+	const identity = oauthCredentialIdentityMaterial(credential);
 	if (!identity) return undefined;
 	const fingerprint = createHash("sha256").update(identity).digest("base64url");
 	return `${provider}\0oauth-identity:${fingerprint}`;
@@ -1210,7 +1217,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				(credential.type === "oauth" && report.metadata?.source === "subscription-usage"));
 		if (!shouldPublishMetaLimitReport) return true;
 		const credentialId = this.#resolveCredentialId(provider, credential);
-		if (credentialId === undefined) return true;
+		if (credentialId === undefined) return false;
 		return this.#publishUsageLimitReport(credentialId, report);
 	}
 
@@ -1232,9 +1239,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			}
 			return undefined;
 		}
+		const credentialKey = usageCredentialOverlayKey(provider, credential);
+		if (!credentialKey) return undefined;
 		for (const entry of this.#snapshot.credentials) {
 			if (entry.provider !== provider || entry.credential.type !== "oauth") continue;
-			if (usageOverlayKey(provider, credential) === usageOverlayKey(provider, entry.credential)) return entry.id;
+			const entryKey = usageCredentialOverlayKey(provider, entry.credential);
+			if (entryKey === credentialKey) return entry.id;
 		}
 		return undefined;
 	}
@@ -1266,7 +1276,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		if (!key) return undefined;
 		const overlay = this.#usageOverlays.get(key);
 		if (!overlay) return undefined;
-		if (Date.now() - overlay.fetchedAt >= ttlMs) {
+		const now = Date.now();
+		if (!isUsageReportCacheActive(overlay, now, ttlMs)) {
 			this.#usageOverlays.delete(key);
 			return undefined;
 		}
@@ -1283,16 +1294,17 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			if (report.provider !== provider) continue;
 			const reportCredentialId = readBrokerCredentialIdMetadata((report.metadata ?? {}) as Record<string, unknown>);
 			if (reportCredentialId !== credentialId) continue;
-			if (now - report.fetchedAt >= ttlMs) continue;
+			if (!isUsageReportCacheActive(report, now, ttlMs)) continue;
 			return report;
 		}
 		return null;
 	}
 
 	#applyUsageOverlays(reports: UsageReport[]): UsageReport[] {
+		const now = Date.now();
 		const overlays = [...this.#usageOverlays.entries()].filter(([, overlay]) => {
 			const ttlMs = this.#usageOverlayTtlMs(overlay.provider as Provider);
-			return Date.now() - overlay.fetchedAt < ttlMs;
+			return isUsageReportCacheActive(overlay, now, ttlMs);
 		});
 		if (overlays.length === 0) return reports;
 		const merged = [...reports];

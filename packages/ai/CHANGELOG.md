@@ -2,10 +2,8 @@
 
 ## [Unreleased]
 
-### Added
-- Meta Muse subscription OAuth login (`/login meta`) mints ephemeral Model API keys from Meta-account device authorization and ingests authoritative `response.subscription_usage` SSE snapshots for OAuth credentials, while API-key `META_API_KEY` / manual keys keep PAYG RPM/TPM header semantics unchanged.
-
-### Added
+### Fixed
+- Meta Muse subscription usage now resolves broker OAuth credentials by hashed identity material (skipping remote refresh sentinels) and retains each subscription limit until its own provider-reported reset instead of failing open after one minute.
 
 - Added provider-authoritative Meta Model API per-minute headroom to usage reports and routing when response headers are available.
 - Added broker `POST /v1/usage/limit-report` so header-derived Meta usage limits persist through the canonical auth broker for cross-process readers.

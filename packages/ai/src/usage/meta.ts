@@ -6,7 +6,7 @@ import type {
 	UsageProvider,
 	UsageReport,
 } from "../usage";
-import { parseIsoTimestamp, usageStatus } from "./shared";
+import { parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const META_API_ORIGIN = "https://api.meta.ai";
 const MINUTE_MS = 60_000;
@@ -219,6 +219,6 @@ export const metaRankingStrategy: CredentialRankingStrategy = {
 	},
 	windowDefaults: {
 		primaryMs: MINUTE_MS,
-		secondaryMs: MINUTE_MS,
+		secondaryMs: WEEK_MS,
 	},
 };
