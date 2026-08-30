@@ -1,0 +1,25 @@
+schema_version: "1"
+repo: oh-my-pi
+owner: oh-my-pi
+capabilities:
+  - id: model-usage
+    type: API
+    name: Canonical provider/model quota and usage
+    description: Authoritative aggregated provider and model usage, quota, and headroom from the OMP auth broker.
+    authority: authoritative
+    lifecycle: active
+    service: omp-auth-broker
+    interfaces:
+      - GET /v1/usage
+    tags:
+      - models
+      - quota
+      - usage
+      - routing
+      - headroom
+    source_paths:
+      - packages/ai/src/auth-broker/server.ts
+    consumers:
+      - dashboard
+      - foreman
+    docs: packages/ai/src/auth-broker/server.ts
