@@ -1,8 +1,9 @@
 import { createApiKeyLogin } from "./api-key-login";
-import type { OAuthLoginCallbacks } from "./oauth/types";
+import { loginMetaOAuth, refreshMetaOAuthToken } from "./oauth/meta";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
-export const loginMeta = createApiKeyLogin({
+export const loginMetaApiKey = createApiKeyLogin({
 	providerLabel: "Meta Model API",
 	authUrl: "https://developer.meta.com/ai/",
 	instructions: "Create or copy your key from the Meta Model API dashboard",
@@ -15,8 +16,15 @@ export const loginMeta = createApiKeyLogin({
 	},
 });
 
+/** @deprecated Use {@link loginMetaApiKey} for PAYG API-key paste login. */
+export const loginMeta = loginMetaApiKey;
+
 export const metaProvider = {
 	id: "meta",
 	name: "Meta Model API",
-	login: (cb: OAuthLoginCallbacks) => loginMeta(cb),
+	envKeys: "META_API_KEY",
+	login: (cb: OAuthLoginCallbacks) => loginMetaOAuth(cb),
+	refreshToken: (credentials: OAuthCredentials, signal?: AbortSignal) =>
+		refreshMetaOAuthToken(credentials, undefined, signal),
+	getApiKey: (credentials: OAuthCredentials) => credentials.access,
 } as const satisfies ProviderDefinition;

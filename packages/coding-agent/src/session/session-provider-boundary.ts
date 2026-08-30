@@ -36,6 +36,7 @@ export interface SessionProviderBoundaryHost {
 	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
+	onSubscriptionUsage: SimpleStreamOptions["onSubscriptionUsage"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	obfuscator: SecretObfuscator | undefined;
 }
@@ -145,6 +146,7 @@ export class SessionProviderBoundary {
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider = "anthropic"): SimpleStreamOptions {
 		const sessionOnPayload = this.#host.onPayload;
 		const sessionOnResponse = this.#host.onResponse;
+		const sessionOnSubscriptionUsage = this.#host.onSubscriptionUsage;
 		const sessionMetadata = this.#host.agent.metadataForProvider(provider);
 		const sessionOnSseEvent = this.#host.onSseEvent;
 		const openrouterRoutingPreset =
@@ -196,6 +198,18 @@ export class SessionProviderBoundary {
 				preparedOptions.onResponse = async (response, model) => {
 					await sessionOnResponse(response, model);
 					await requestOnResponse(response, model);
+				};
+			}
+		}
+
+		if (sessionOnSubscriptionUsage) {
+			if (!options.onSubscriptionUsage) {
+				preparedOptions.onSubscriptionUsage = sessionOnSubscriptionUsage;
+			} else {
+				const requestOnSubscriptionUsage = options.onSubscriptionUsage;
+				preparedOptions.onSubscriptionUsage = async (event, model) => {
+					await sessionOnSubscriptionUsage(event, model);
+					await requestOnSubscriptionUsage(event, model);
 				};
 			}
 		}

@@ -137,6 +137,32 @@ export function readBrokerCredentialIdMetadata(metadata: Record<string, unknown>
 	return undefined;
 }
 
+function futureSubscriptionResetTimes(report: UsageReport, now: number): number[] {
+	if (report.metadata?.source !== "subscription-usage") return [];
+	return report.limits
+		.map(limit => limit.window?.resetsAt)
+		.filter((resetsAt): resetsAt is number => resetsAt !== undefined && resetsAt > now);
+}
+
+/** Whether a cached or overlay usage report is still authoritative at `now`. */
+export function isUsageReportCacheActive(report: UsageReport, now: number, defaultTtlMs: number): boolean {
+	const futureResets = futureSubscriptionResetTimes(report, now);
+	if (report.metadata?.source === "subscription-usage") {
+		if (futureResets.length > 0) return true;
+		return false;
+	}
+	return now - report.fetchedAt < defaultTtlMs;
+}
+
+/** Absolute cache expiry for a usage report snapshot. */
+export function resolveUsageReportCacheExpiresAt(report: UsageReport, now: number, defaultTtlMs: number): number {
+	const futureResets = futureSubscriptionResetTimes(report, now);
+	if (report.metadata?.source === "subscription-usage") {
+		return futureResets.length > 0 ? Math.max(...futureResets) : now;
+	}
+	return now + defaultTtlMs;
+}
+
 /**
  * Resolve a limit's used fraction (0..1; >1 means overage) from whichever
  * amount fields the provider populated. Precedence mirrors the usage UIs:
@@ -371,6 +397,8 @@ export interface UsageProvider {
 	fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null>;
 	/** Parse provider rate-limit response headers (lowercased keys) into a usage report, if supported. */
 	parseRateLimitHeaders?(headers: Record<string, string>, now?: number): UsageReport | null;
+	/** Parse a provider stream event (e.g. Meta `response.subscription_usage`) into a usage report. */
+	parseSubscriptionUsageEvent?(event: unknown, now?: number): UsageReport | null;
 	supports?(params: UsageFetchParams): boolean;
 	/** True when fetchUsage contacts upstream and can authenticate the credential for health checks. */
 	validatesCredentials?: boolean;

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { loginMeta } from "@oh-my-pi/pi-ai/registry/meta";
+import { loginMetaApiKey } from "@oh-my-pi/pi-ai/registry/meta";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -45,7 +45,7 @@ describe("Meta Model API login", () => {
 	test("validates pasted keys against the models endpoint without running inference", async () => {
 		let requestedUrl = "";
 		let authorization = "";
-		const apiKey = await loginMeta({
+		const apiKey = await loginMetaApiKey({
 			onAuth: () => {},
 			onPrompt: async () => " meta-test-key ",
 			fetch: (input, init) => {

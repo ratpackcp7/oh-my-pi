@@ -521,6 +521,12 @@ export interface StreamOptions {
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>) => void | Promise<void>;
 	/**
+	 * Optional callback after a provider stream delivers authoritative subscription
+	 * usage (e.g. Meta `response.subscription_usage`). Observers must not alter
+	 * stream contents.
+	 */
+	onSubscriptionUsage?: (event: unknown, model?: Model<Api>) => void | Promise<void>;
+	/**
 	 * Optional callback for raw Server-Sent Events as they arrive from HTTP streaming providers,
 	 * plus synthesized SSE-shaped frames for the Codex WebSocket transport (one synthetic frame
 	 * per JSON request/response message). WebSocket frames are tagged with a leading

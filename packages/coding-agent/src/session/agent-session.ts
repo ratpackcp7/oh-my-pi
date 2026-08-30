@@ -643,6 +643,7 @@ export class AgentSession {
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	#onResponse: SimpleStreamOptions["onResponse"] | undefined;
+	#onSubscriptionUsage: SimpleStreamOptions["onSubscriptionUsage"] | undefined;
 	/**
 	 * Providers/models (`${provider}/${id}`) whose runtime context window has
 	 * already been re-probed after their first successful inference this session,
@@ -1259,6 +1260,15 @@ export class AgentSession {
 			: (event, model) => {
 					this.rawSseDebugBuffer.recordEvent(event, model);
 				};
+		const configuredOnSubscriptionUsage = config.onSubscriptionUsage;
+		this.#onSubscriptionUsage = configuredOnSubscriptionUsage
+			? async (event, model) => {
+					await this.#stats.ingestProviderSubscriptionUsage(event, model);
+					await configuredOnSubscriptionUsage(event, model);
+				}
+			: async (event, model) => {
+					await this.#stats.ingestProviderSubscriptionUsage(event, model);
+				};
 		this.agent.setProviderResponseInterceptor(this.#onResponse);
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
@@ -1408,6 +1418,7 @@ export class AgentSession {
 			convertToLlm: messages => this.#convertToLlm(messages),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
+			onSubscriptionUsage: this.#onSubscriptionUsage,
 			onSseEvent: this.#onSseEvent,
 			obfuscator: this.#obfuscator,
 		};
@@ -1528,6 +1539,7 @@ export class AgentSession {
 			preferWebsockets: this.#preferWebsockets,
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
+			onSubscriptionUsage: this.#onSubscriptionUsage,
 			onSseEvent: this.#onSseEvent,
 			isDisposed: () => this.#isDisposed,
 			abortInProgress: () => this.#abortInProgress,

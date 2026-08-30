@@ -52,8 +52,10 @@ import type {
 import {
 	BROKER_CREDENTIAL_ID_METADATA_KEY,
 	classifyUsageFetchThrow,
+	isUsageReportCacheActive,
 	observeUsageFetch,
 	readBrokerCredentialIdMetadata,
+	resolveUsageReportCacheExpiresAt,
 	resolveUsedFraction,
 } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
@@ -3660,9 +3662,11 @@ export class AuthStorage {
 		credential: UsageHeaderCredential,
 		options: { baseUrl?: string } | undefined,
 		now: number,
+		ingestOptions?: { bypassThrottle?: boolean },
 	): boolean | Promise<boolean> {
 		const request = this.#buildUsageRequest(provider, credential.usage, options?.baseUrl);
-		if (providerImpl.supports && !providerImpl.supports(request)) return false;
+		const isSubscriptionReport = parsedReport.metadata?.source === "subscription-usage";
+		if (!isSubscriptionReport && providerImpl.supports && !providerImpl.supports(request)) return false;
 		const cacheKey = this.#buildUsageReportCacheKey(request);
 		// Throttled to one ingest per interval — except when a window reads
 		// exhausted: persist that snapshot immediately. A full-backed cache can
@@ -3670,7 +3674,14 @@ export class AuthStorage {
 		// by the provider's explicit header TTL.
 		const exhausted = parsedReport.limits.some(limit => this.#isUsageLimitExhausted(limit));
 		const last = this.#usageHeaderIngestAt.get(cacheKey);
-		if (!exhausted && last !== undefined && now - last < USAGE_HEADER_INGEST_INTERVAL_MS) return false;
+		if (
+			!ingestOptions?.bypassThrottle &&
+			!exhausted &&
+			last !== undefined &&
+			now - last < USAGE_HEADER_INGEST_INTERVAL_MS
+		) {
+			return false;
+		}
 		const metadata: Record<string, unknown> = { ...(parsedReport.metadata ?? {}) };
 		if (credential.auth.type === "oauth") {
 			if (credential.auth.accountId && metadata.accountId === undefined)
@@ -3791,7 +3802,7 @@ export class AuthStorage {
 		const headerTtlMs = providerImpl.headerReportTtlMs;
 		const expiresAt =
 			headerTtlMs !== undefined && Number.isFinite(headerTtlMs) && headerTtlMs > 0
-				? now + headerTtlMs
+				? resolveUsageReportCacheExpiresAt(merged, now, headerTtlMs)
 				: Math.max(priorEntry?.expiresAt ?? now - 1, now - 1);
 		const cacheEntry = { value: merged, expiresAt };
 		this.#usageCache.set(cacheKey, cacheEntry);
@@ -3849,6 +3860,32 @@ export class AuthStorage {
 		return apiKey
 			? this.#ingestParsedUsageHeaders(provider, providerImpl, parsedReport, apiKey, options, now)
 			: false;
+	}
+
+	ingestUsageSubscriptionEvent(
+		provider: Provider,
+		event: unknown,
+		options?: { sessionId?: string },
+	): boolean | Promise<boolean> {
+		if (this.#fetchUsageReportsOverride) return false;
+		const providerImpl = this.#resolveUsageProvider(provider);
+		const parseEvent = providerImpl?.parseSubscriptionUsageEvent;
+		if (!providerImpl || !parseEvent) return false;
+		const now = Date.now();
+		const parsedReport = parseEvent(event, now);
+		if (!parsedReport) return false;
+
+		const oauth = this.#resolveActiveOAuthCredential(provider, options?.sessionId);
+		if (!oauth) return false;
+		return this.#ingestParsedUsageHeaders(
+			provider,
+			providerImpl,
+			parsedReport,
+			{ auth: oauth, usage: this.#buildUsageCredential(oauth) },
+			undefined,
+			now,
+			{ bypassThrottle: true },
+		);
 	}
 
 	async #collectUsageRequests(options?: {
@@ -4133,10 +4170,8 @@ export class AuthStorage {
 		// would defeat the point of routing through it. API-key credentials do
 		// not have a broker per-credential hook, so they use the normal cached
 		// provider fetch path.
-		// Under `cachedOnly` the broker hook is skipped outright: it performs a
-		// network aggregate on a cold broker cache and exposes no cached-only
-		// accessor, so broker-backed OAuth resolves to `unknown` instead of
-		// fetching — exactly today's routing behavior.
+		// Under `cachedOnly` the live broker hook is skipped so routing never
+		// triggers a network aggregate; use the store's passive peek instead.
 		if (credential.type === "oauth" && options?.cachedOnly !== true) {
 			const storeHook = this.#store.getUsageReport?.bind(this.#store);
 			if (storeHook) {
@@ -4151,17 +4186,18 @@ export class AuthStorage {
 			}
 		}
 		const usageCredential = this.#buildUsageCredential(credential);
-		if (credential.type === "api_key") {
-			if (options?.cachedOnly === true) {
-				const peekHook = this.#store.peekCachedUsageReport?.bind(this.#store);
-				if (peekHook) {
-					try {
-						return peekHook(provider, credential);
-					} catch {
-						return null;
-					}
+		if (options?.cachedOnly === true) {
+			const peekHook = this.#store.peekCachedUsageReport?.bind(this.#store);
+			if (peekHook) {
+				try {
+					const peeked = peekHook(provider, credential);
+					if (peeked) return peeked;
+				} catch {
+					return null;
 				}
 			}
+		}
+		if (credential.type === "api_key") {
 			const resolvedApiKey = await this.#configValueResolver(credential.key);
 			if (!resolvedApiKey) return null;
 			usageCredential.apiKey = resolvedApiKey;
@@ -4347,8 +4383,12 @@ export class AuthStorage {
 				// A cached row past its TTL is not routing input: under `cachedOnly`
 				// nothing will refresh it, so report `unknown` rather than steering on
 				// a quota snapshot that may be arbitrarily out of date.
-				if (options.cachedOnly === true && nowMs - report.fetchedAt > USAGE_REPORT_TTL_MS) {
-					return { credentialId: entry.id, credentialType, accountKey, state: "unknown" };
+				if (options.cachedOnly === true) {
+					const providerImpl = this.#resolveUsageProvider(provider);
+					const defaultTtlMs = providerImpl?.headerReportTtlMs ?? USAGE_REPORT_TTL_MS;
+					if (!isUsageReportCacheActive(report, nowMs, defaultTtlMs)) {
+						return { credentialId: entry.id, credentialType, accountKey, state: "unknown" };
+					}
 				}
 
 				// Reserve health is opt-in and non-destructive: prefer the strategy's
@@ -7126,7 +7166,7 @@ export class AuthStorage {
 				},
 			};
 		}
-		const expiresAt = now + headerTtlMs;
+		const expiresAt = resolveUsageReportCacheExpiresAt(merged, now, headerTtlMs);
 		this.#usageCache.set(cacheKey, { value: merged, expiresAt });
 		this.#usageHeaderIngestAt.set(cacheKey, now);
 		return true;
