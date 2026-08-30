@@ -350,6 +350,21 @@ export class SessionStatsTracker {
 			// Usage-header ingest is best-effort and must not break model responses.
 		}
 	}
+
+	/** Records provider subscription usage events against the active OAuth session account. */
+	async ingestProviderSubscriptionUsage(event: unknown, model?: Model): Promise<void> {
+		const provider = model?.provider;
+		if (!provider) return;
+		try {
+			await Promise.resolve(
+				this.#host.modelRegistry.authStorage.ingestUsageSubscriptionEvent(provider, event, {
+					sessionId: this.#host.agent.sessionId,
+				}),
+			);
+		} catch {
+			// Subscription usage ingest is best-effort and must not break model responses.
+		}
+	}
 }
 
 function taskToolUsage(details: unknown): Usage | undefined {

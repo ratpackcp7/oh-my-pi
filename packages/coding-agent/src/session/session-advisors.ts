@@ -241,6 +241,7 @@ export interface SessionAdvisorsHost {
 	preferWebsockets: boolean | undefined;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
+	onSubscriptionUsage: SimpleStreamOptions["onSubscriptionUsage"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	isDisposed(): boolean;
 	abortInProgress(): boolean;
@@ -905,6 +906,7 @@ export class SessionAdvisors {
 				streamFn: advisorStreamFn,
 				onPayload: this.#host.onPayload,
 				onResponse: this.#host.onResponse,
+				onSubscriptionUsage: this.#host.onSubscriptionUsage,
 				onSseEvent: this.#host.onSseEvent,
 				transformProviderContext: this.#transformProviderContext,
 				intentTracing: false,

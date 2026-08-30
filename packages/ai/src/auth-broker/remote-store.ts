@@ -194,7 +194,13 @@ function usageCredentialOverlayKey(provider: Provider, credential: AuthCredentia
 		const fingerprint = createHash("sha256").update(key).digest("base64url");
 		return `${provider}\0api-key:${fingerprint}`;
 	}
-	return usageOverlayKey(provider, credential);
+	const keyed = usageOverlayKey(provider, credential);
+	if (keyed) return keyed;
+	if (credential.type !== "oauth") return undefined;
+	const identity = credential.refresh.trim() || credential.access.trim();
+	if (!identity) return undefined;
+	const fingerprint = createHash("sha256").update(identity).digest("base64url");
+	return `${provider}\0oauth-identity:${fingerprint}`;
 }
 
 function mergeUsageReports(base: UsageReport, overlay: UsageReport): UsageReport {
@@ -1198,7 +1204,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const overlayTtlMs = this.#usageOverlayTtlMs(provider);
 		const activeOverlay = this.#getActiveUsageOverlay(provider, credential, overlayTtlMs);
 		this.#usageOverlays.set(key, activeOverlay ? mergeUsageReports(activeOverlay, report) : report);
-		if (provider !== "meta" || credential.type !== "api_key") return true;
+		const shouldPublishMetaLimitReport =
+			provider === "meta" &&
+			(credential.type === "api_key" ||
+				(credential.type === "oauth" && report.metadata?.source === "subscription-usage"));
+		if (!shouldPublishMetaLimitReport) return true;
 		const credentialId = this.#resolveCredentialId(provider, credential);
 		if (credentialId === undefined) return true;
 		return this.#publishUsageLimitReport(credentialId, report);

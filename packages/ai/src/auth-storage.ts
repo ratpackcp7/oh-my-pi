@@ -3660,9 +3660,11 @@ export class AuthStorage {
 		credential: UsageHeaderCredential,
 		options: { baseUrl?: string } | undefined,
 		now: number,
+		ingestOptions?: { bypassThrottle?: boolean },
 	): boolean | Promise<boolean> {
 		const request = this.#buildUsageRequest(provider, credential.usage, options?.baseUrl);
-		if (providerImpl.supports && !providerImpl.supports(request)) return false;
+		const isSubscriptionReport = parsedReport.metadata?.source === "subscription-usage";
+		if (!isSubscriptionReport && providerImpl.supports && !providerImpl.supports(request)) return false;
 		const cacheKey = this.#buildUsageReportCacheKey(request);
 		// Throttled to one ingest per interval — except when a window reads
 		// exhausted: persist that snapshot immediately. A full-backed cache can
@@ -3670,7 +3672,14 @@ export class AuthStorage {
 		// by the provider's explicit header TTL.
 		const exhausted = parsedReport.limits.some(limit => this.#isUsageLimitExhausted(limit));
 		const last = this.#usageHeaderIngestAt.get(cacheKey);
-		if (!exhausted && last !== undefined && now - last < USAGE_HEADER_INGEST_INTERVAL_MS) return false;
+		if (
+			!ingestOptions?.bypassThrottle &&
+			!exhausted &&
+			last !== undefined &&
+			now - last < USAGE_HEADER_INGEST_INTERVAL_MS
+		) {
+			return false;
+		}
 		const metadata: Record<string, unknown> = { ...(parsedReport.metadata ?? {}) };
 		if (credential.auth.type === "oauth") {
 			if (credential.auth.accountId && metadata.accountId === undefined)
@@ -3849,6 +3858,32 @@ export class AuthStorage {
 		return apiKey
 			? this.#ingestParsedUsageHeaders(provider, providerImpl, parsedReport, apiKey, options, now)
 			: false;
+	}
+
+	ingestUsageSubscriptionEvent(
+		provider: Provider,
+		event: unknown,
+		options?: { sessionId?: string },
+	): boolean | Promise<boolean> {
+		if (this.#fetchUsageReportsOverride) return false;
+		const providerImpl = this.#resolveUsageProvider(provider);
+		const parseEvent = providerImpl?.parseSubscriptionUsageEvent;
+		if (!providerImpl || !parseEvent) return false;
+		const now = Date.now();
+		const parsedReport = parseEvent(event, now);
+		if (!parsedReport) return false;
+
+		const oauth = this.#resolveActiveOAuthCredential(provider, options?.sessionId);
+		if (!oauth) return false;
+		return this.#ingestParsedUsageHeaders(
+			provider,
+			providerImpl,
+			parsedReport,
+			{ auth: oauth, usage: this.#buildUsageCredential(oauth) },
+			undefined,
+			now,
+			{ bypassThrottle: true },
+		);
 	}
 
 	async #collectUsageRequests(options?: {

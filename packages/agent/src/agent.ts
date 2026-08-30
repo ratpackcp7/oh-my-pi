@@ -178,6 +178,10 @@ export interface AgentOptions {
 	 */
 	onResponse?: SimpleStreamOptions["onResponse"];
 	/**
+	 * Ingest provider-authoritative subscription usage snapshots from streaming responses.
+	 */
+	onSubscriptionUsage?: SimpleStreamOptions["onSubscriptionUsage"];
+	/**
 	 * Inspect raw Server-Sent Events from HTTP streaming providers.
 	 */
 	onSseEvent?: SimpleStreamOptions["onSseEvent"];
@@ -417,6 +421,7 @@ export class Agent {
 	#deferredToolChoice?: ToolChoice;
 	#onPayload?: SimpleStreamOptions["onPayload"];
 	#onResponse?: SimpleStreamOptions["onResponse"];
+	#onSubscriptionUsage?: SimpleStreamOptions["onSubscriptionUsage"];
 	#onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
@@ -485,6 +490,7 @@ export class Agent {
 		this.getApiKey = opts.getApiKey;
 		this.#onPayload = opts.onPayload;
 		this.#onResponse = opts.onResponse;
+		this.#onSubscriptionUsage = opts.onSubscriptionUsage;
 		this.#onSseEvent = opts.onSseEvent;
 		this.#getToolContext = opts.getToolContext;
 		this.#cursorExecHandlers = opts.cursorExecHandlers;
@@ -1423,6 +1429,7 @@ export class Agent {
 			transformContext: this.#transformContext,
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
+			onSubscriptionUsage: this.#onSubscriptionUsage,
 			onSseEvent: this.#onSseEvent,
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,

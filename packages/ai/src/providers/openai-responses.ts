@@ -726,6 +726,8 @@ const streamOpenAIResponsesOnce = (
 			while (true) {
 				let sawReplayUnsafeOutput = false;
 				let sawTerminalResponseEvent = false;
+				let latestMetaSubscriptionUsage: unknown;
+				const trackMetaSubscriptionUsage = model.provider === "meta" && options?.onSubscriptionUsage !== undefined;
 				const attemptStream = new AssistantMessageEventStream();
 				let forwardAttemptLive = false;
 				const forwardAttemptEvents = () => {
@@ -745,6 +747,13 @@ const streamOpenAIResponsesOnce = (
 				});
 				const observedOpenaiStream = (async function* (): AsyncGenerator<ResponseStreamEvent> {
 					for await (const event of timedOpenaiStream) {
+						if (
+							trackMetaSubscriptionUsage &&
+							"type" in event &&
+							(event as { type: string }).type === "response.subscription_usage"
+						) {
+							latestMetaSubscriptionUsage = event;
+						}
 						if (isOpenAIResponsesReplayUnsafeEvent(event)) {
 							sawReplayUnsafeOutput = true;
 							if (!forwardAttemptLive) {
@@ -791,6 +800,9 @@ const streamOpenAIResponsesOnce = (
 							provider: model.provider,
 							kind: "runtime",
 						});
+					}
+					if (latestMetaSubscriptionUsage !== undefined) {
+						await options?.onSubscriptionUsage?.(latestMetaSubscriptionUsage, model);
 					}
 					forwardAttemptEvents();
 					break;

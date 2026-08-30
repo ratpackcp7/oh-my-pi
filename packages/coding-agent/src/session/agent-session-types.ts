@@ -219,6 +219,8 @@ export interface AgentSessionConfig {
 	onPayload?: SimpleStreamOptions["onPayload"];
 	/** Provider response hook used by the active session request path. */
 	onResponse?: SimpleStreamOptions["onResponse"];
+	/** Provider subscription-usage hook used by the active session request path. */
+	onSubscriptionUsage?: SimpleStreamOptions["onSubscriptionUsage"];
 	/** Raw SSE hook used by the active session request path. */
 	onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	/** Per-session raw SSE diagnostic buffer. */
