@@ -655,3 +655,96 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(mode.vibeModeEnabled).toBe(false);
 	});
 });
+
+describe("InteractiveMode vibe to normal switch restores coding tools", () => {
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let session: AgentSession;
+	let mode: InteractiveMode;
+	let modelRegistry: ModelRegistry;
+
+	beforeAll(async () => {
+		await initTheme();
+		tempDir = TempDir.createSync("@pi-vibe-coding-tools-");
+		authStorage = createInMemoryAuthStorage();
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		VibeSessionRegistry.resetGlobalForTests();
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		const registryTools = [
+			stubTool("bash"),
+			stubTool("read"),
+			stubTool("edit"),
+			stubTool("write"),
+			stubTool("task"),
+			stubTool("todo"),
+		];
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				streamFn: () => {
+					throw new Error("No test stream configured");
+				},
+			}),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated({}),
+			modelRegistry,
+			toolRegistry: new Map(registryTools.map(tool => [tool.name, tool])),
+			builtInToolNames: registryTools.map(tool => tool.name),
+			createVibeTools: () => VIBE_TOOL_NAMES.map(stubTool),
+		});
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, new EventBus());
+	});
+
+	afterEach(async () => {
+		mode?.stop();
+		await session?.dispose();
+		VibeSessionRegistry.resetGlobalForTests();
+		vi.restoreAllMocks();
+		resetSettingsForTest();
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		tempDir.removeSync();
+	});
+
+	it("restores shell/edit/write/task after vibe to normal session switch", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await session.setActiveToolsByName(["bash", "read", "edit", "write", "task", "todo"]);
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(session.getActiveToolNames()).not.toContain("bash");
+		expect(session.getActiveToolNames()).not.toContain("edit");
+		expect(session.getActiveToolNames()).not.toContain("write");
+
+		const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
+		targetManager.appendModeChange("none");
+		await targetManager.ensureOnDisk();
+		const targetFile = targetManager.getSessionFile();
+		if (!targetFile) throw new Error("Expected target session file");
+		await targetManager.close();
+
+		expect(await session.switchSession(targetFile)).toBe(true);
+		expect(mode.vibeModeEnabled).toBe(false);
+		const enabled = session.getEnabledToolNames();
+		for (const name of ["bash", "read", "edit", "write", "task"]) {
+			expect(enabled).toContain(name);
+		}
+		for (const name of VIBE_TOOL_NAMES) {
+			expect(enabled).not.toContain(name);
+		}
+	});
+});
+
