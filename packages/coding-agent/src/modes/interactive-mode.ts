@@ -2984,6 +2984,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	async #ensureNormalCodingToolset(): Promise<void> {
+		if (
+			this.vibeModeEnabled ||
+			this.planModeEnabled ||
+			this.planModePaused ||
+			this.goalModeEnabled ||
+			this.goalModePaused
+		) {
+			return;
+		}
+		const registered = new Set(this.session.getAllToolNames());
+		const enabled = this.session.getEnabledToolNames();
+		const enabledSet = new Set(enabled);
+		const missing = ["bash", "read", "edit", "write", "grep", "task"].filter(
+			name => registered.has(name) && !enabledSet.has(name),
+		);
+		if (missing.length === 0) {
+			return;
+		}
+		await this.session.setActiveToolsByName([...enabled, ...missing]);
+	}
+
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
@@ -3011,12 +3033,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
 			this.session.goalRuntime.clearAccounting();
 			this.sessionManager.appendModeChange("none");
+			if (vibeToolsetLostToTeardown) await this.#ensureNormalCodingToolset();
 			return;
 		}
 		if (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused") {
 			const goal = this.#goalFromModeData(sessionContext.modeData);
 			if (!goal) {
 				this.sessionManager.appendModeChange("none");
+				if (vibeToolsetLostToTeardown) await this.#ensureNormalCodingToolset();
 				return;
 			}
 			this.session.setGoalModeState({
@@ -3057,6 +3081,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (sessionContext.mode === "plan" || sessionContext.mode === "plan_paused") {
 				this.sessionManager.appendModeChange("none");
 			}
+			if (vibeToolsetLostToTeardown) await this.#ensureNormalCodingToolset();
 			return;
 		}
 		if (sessionContext.mode === "plan") {
@@ -3067,6 +3092,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#planModeHasEntered = true;
 			this.#updatePlanModeStatus();
 		}
+		if (vibeToolsetLostToTeardown) await this.#ensureNormalCodingToolset();
 	}
 
 	async #enterPlanMode(options?: {
