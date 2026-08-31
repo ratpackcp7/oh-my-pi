@@ -747,4 +747,3 @@ describe("InteractiveMode vibe to normal switch restores coding tools", () => {
 		}
 	});
 });
-

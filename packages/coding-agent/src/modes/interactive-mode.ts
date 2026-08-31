@@ -3033,14 +3033,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
 			this.session.goalRuntime.clearAccounting();
 			this.sessionManager.appendModeChange("none");
-			await this.#ensureNormalCodingToolset();
+			if (vibeToolsetLostToTeardown) await this.#ensureNormalCodingToolset();
 			return;
 		}
 		if (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused") {
 			const goal = this.#goalFromModeData(sessionContext.modeData);
 			if (!goal) {
 				this.sessionManager.appendModeChange("none");
-				await this.#ensureNormalCodingToolset();
+				if (vibeToolsetLostToTeardown) await this.#ensureNormalCodingToolset();
 				return;
 			}
 			this.session.setGoalModeState({
@@ -3081,7 +3081,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (sessionContext.mode === "plan" || sessionContext.mode === "plan_paused") {
 				this.sessionManager.appendModeChange("none");
 			}
-			await this.#ensureNormalCodingToolset();
+			if (vibeToolsetLostToTeardown) await this.#ensureNormalCodingToolset();
 			return;
 		}
 		if (sessionContext.mode === "plan") {
@@ -3092,7 +3092,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#planModeHasEntered = true;
 			this.#updatePlanModeStatus();
 		}
-		await this.#ensureNormalCodingToolset();
+		if (vibeToolsetLostToTeardown) await this.#ensureNormalCodingToolset();
 	}
 
 	async #enterPlanMode(options?: {
