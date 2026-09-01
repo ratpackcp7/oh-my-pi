@@ -9,6 +9,25 @@ than anyone re-read it. The `docs/` tree is kept current (and indexed for the
 in-agent `docs://` / `/docs` surface), so this file links there instead of
 duplicating prose that goes stale.
 
+## Monorepo orientation
+
+### Package structure
+
+| Package                 | Description                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------- |
+| `packages/ai`           | Multi-provider LLM client with streaming support                                        |
+| `packages/catalog`      | Model catalog: bundled models.json, provider descriptors, model identity/classification |
+| `packages/agent`        | Agent runtime with tool calling and state management                                    |
+| `packages/coding-agent` | Main CLI application (primary focus)                                                    |
+| `packages/tui`          | Terminal UI library with differential rendering                                         |
+| `packages/natives`      | Bindings for native text/image/grep operations                                          |
+| `packages/stats`        | Local observability dashboard (`omp stats`)                                             |
+| `packages/omptype`      | ArkType-compatible schema validation with a lazy JIT runtime                            |
+| `packages/utils`        | Shared utilities (logger, streams, temp files)                                          |
+| `crates/pi-natives`     | Rust crate for performance-critical text/grep ops                                       |
+
+**Catalog import convention**: code in this repo imports catalog _values_ (bundled models, model-thinking helpers, identity, descriptors, model manager/cache) from `@oh-my-pi/pi-catalog/<module>` — never via `@oh-my-pi/pi-ai`. The pi-ai barrel re-exports only the model/effort _types_ its own signatures use (`Model`, `Api`, `ThinkingConfig`, `Effort`, …); type-only imports of those from `@oh-my-pi/pi-ai` are fine.
+
 ## Local development
 
 Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
@@ -50,7 +69,7 @@ createAgentSession(...)        ── src/sdk.ts → AgentSession
 
 `cli.ts` doubles as the worker host: it declares itself via `declareWorkerHostEntry()`
 and dispatches the hidden `__omp_worker_*` argv selectors before loading the command
-registry (see `AGENTS.md` → *Worker scripts*).
+registry (see [`docs/development-conventions.md`](../../docs/development-conventions.md#worker-scripts)).
 
 ## Source layout (`src/`)
 
@@ -161,5 +180,6 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 | A provider | [adding-a-provider.md](../../docs/adding-a-provider.md) |
 | Programmatic/SDK use | [sdk.md](../../docs/sdk.md) |
 
-See also `AGENTS.md` at the repo root for repo-wide conventions (Bun-over-Node,
-logging, TUI sanitization, generated files, changelog, releasing).
+See also the repo-root `AGENTS.md` for startup invariants and task routing, then read
+[`docs/development-conventions.md`](../../docs/development-conventions.md) for detailed
+Bun, logging, TUI, testing, changelog, and release conventions when relevant.
