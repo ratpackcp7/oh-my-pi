@@ -1,0 +1,9 @@
+{
+	"version": 1,
+	"total": 2,
+	"criteria": [
+		{ "id": "file-a", "name": "proof-a.txt written", "weight": 1 },
+		{ "id": "file-b", "name": "proof-b.txt written", "weight": 1 }
+	],
+	"deductions": []
+}

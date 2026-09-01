@@ -1,0 +1,12 @@
+{
+	"id": "design-bench-smoke",
+	"version": 1,
+	"title": "Design-bench end-to-end smoke",
+	"description": "Tiny fixture proving the wrapper end to end: init → run → proof validation → score → report → reveal. Not a design benchmark.",
+	"promptFile": "scripts/bench-defs/design/smoke.fixture/task.md",
+	"rubricFile": "scripts/bench-defs/design/smoke.rubric.json",
+	"fixtureDir": "scripts/bench-defs/design/smoke.fixture",
+	"requiredProofs": ["proofs/proof-a.txt", "proofs/proof-b.txt"],
+	"proofViewport": { "note": "smoke — file plumbing only" },
+	"capabilities": { "tools": "default" }
+}
