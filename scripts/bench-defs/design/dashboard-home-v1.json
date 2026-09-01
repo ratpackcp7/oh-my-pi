@@ -1,0 +1,12 @@
+{
+	"id": "dashboard-home-design",
+	"version": 1,
+	"title": "CP7 Dashboard Home — design concepts",
+	"description": "Design-only benchmark: conceive and mock up a stronger Home screen for the CP7 smart-home dashboard. Evaluates design conception, not implementation.",
+	"promptFile": "scripts/bench-prompts/design/dashboard-home-v1.md",
+	"rubricFile": "scripts/bench-defs/design/dashboard-home-v1.rubric.json",
+	"fixtureDir": "scripts/bench-defs/design/dashboard-home-v1.fixture",
+	"requiredProofs": ["proofs/mobile-390-dark.png", "proofs/desktop-1440-dark.png"],
+	"proofViewport": { "mobileWidth": 390, "desktopWidth": 1440, "theme": "dark" },
+	"capabilities": { "tools": "default" }
+}

@@ -1,0 +1,24 @@
+{
+	"version": 1,
+	"total": 100,
+	"criteria": [
+		{ "id": "visual-quality", "name": "Visual quality / would the reviewer actually use it?", "weight": 25 },
+		{ "id": "hierarchy-glanceability", "name": "Information hierarchy / glanceability", "weight": 20 },
+		{ "id": "genuine-redesign", "name": "Genuine redesign vs rearranged legacy UI", "weight": 15 },
+		{ "id": "mobile-density", "name": "Mobile density without clutter", "weight": 10 },
+		{ "id": "data-priority-correctness", "name": "Correct use of task priorities/data", "weight": 10 },
+		{ "id": "concept-strength", "name": "Originality / strength of design concept", "weight": 10 },
+		{ "id": "desktop-adaptation", "name": "Desktop adaptation", "weight": 5 },
+		{ "id": "constraint-compliance", "name": "Constraint compliance", "weight": 5 }
+	],
+	"deductions": [
+		{ "id": "stacked-generic-cards", "description": "Stacked generic cards are the primary composition", "points": 10 },
+		{ "id": "forbidden-home-content", "description": "Forbidden content appears on Home (Live activity unless actionable, Quick Access clutter)", "points": 10 },
+		{ "id": "fabricated-metrics", "description": "Fabricated/fake metrics presented as truthful", "points": 15 },
+		{ "id": "horizontal-overflow", "description": "Horizontal overflow at a required viewport", "points": 10 },
+		{ "id": "missing-proof", "description": "Required proof missing or not a genuine render", "points": 15 },
+		{ "id": "excessive-mobile-height", "description": "Excessive mobile height beyond the benchmark threshold", "points": 5 },
+		{ "id": "direct-source-navigation", "description": "Direct-source navigation where progressive disclosure is required", "points": 5 },
+		{ "id": "missing-concepts", "description": "Failure to produce the requested concepts/artifacts (DESIGN.md concepts)", "points": 10 }
+	]
+}

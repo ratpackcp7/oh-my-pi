@@ -1,0 +1,49 @@
+{
+	"_note": "SYNTHETIC representative data for benchmark use only. Values are illustrative, not live readings. Candidates must label this data as representative in mockups and must not invent additional metrics.",
+	"needsAttention": [
+		{ "id": "garage-door", "title": "Garage door open", "since": "2h", "severity": "warn" }
+	],
+	"providerCapacity": {
+		"providers": [
+			{
+				"name": "openrouter",
+				"status": "ok",
+				"models": [
+					{ "name": "claude-opus-4-8", "rpmUsed": 12, "rpmLimit": 60, "dailyTokensUsedM": 1.8, "dailyTokensLimitM": 5 },
+					{ "name": "glm-5.3", "rpmUsed": 41, "rpmLimit": 60, "dailyTokensUsedM": 3.9, "dailyTokensLimitM": 5 }
+				]
+			},
+			{
+				"name": "anthropic",
+				"status": "ok",
+				"models": [{ "name": "claude-haiku-4-5", "rpmUsed": 3, "rpmLimit": 50, "dailyTokensUsedM": 0.4, "dailyTokensLimitM": 2 }]
+			}
+		]
+	},
+	"solar": {
+		"productionW": 1840,
+		"consumptionW": 990,
+		"batteryPct": 72,
+		"batteryState": "charging",
+		"todayKwh": 18.4,
+		"productionCurveKw": [0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.6, 1.4, 2.2, 2.9, 3.4, 3.8, 3.9, 3.6, 3.1, 2.4, 1.5, 0.7, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0]
+	},
+	"rooms": [
+		{ "name": "Living room", "temp": 21.5, "humidity": 48, "lightsOn": 2, "occupied": true },
+		{ "name": "Kitchen", "temp": 22.1, "humidity": 52, "lightsOn": 0, "occupied": true },
+		{ "name": "Bedroom", "temp": 20.2, "humidity": 45, "lightsOn": 0, "occupied": false },
+		{ "name": "Office", "temp": 21.8, "humidity": 44, "lightsOn": 1, "occupied": true },
+		{ "name": "Garage", "temp": 16.4, "humidity": 61, "lightsOn": 0, "occupied": false }
+	],
+	"systems": [
+		{ "name": "HA core", "state": "ok", "detail": "uptime 14d" },
+		{ "name": "cp7.dev tunnel", "state": "ok", "detail": "cloudflared" },
+		{ "name": "Nightly backup", "state": "ok", "detail": "last run 01:57, 3.2 GB" },
+		{ "name": "Disk: root", "state": "warn", "detail": "81% used" }
+	],
+	"liveActivity": [
+		{ "name": "Front door motion", "at": "2m ago" },
+		{ "name": "Kitchen presence", "at": "4m ago" },
+		{ "name": "Office lights on", "at": "26m ago" }
+	]
+}
