@@ -85,6 +85,7 @@ import { ToolAbortError } from "../../tools/tool-errors";
 import { applyHyperlinkSetting } from "../../tui/hyperlink";
 import { copyToClipboard } from "../../utils/clipboard";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { formatActualSpendSection, formatEstimatedTokenValue } from "../../usage/spend-display";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AgentsHubComponent } from "../components/agents-hub";
@@ -287,6 +288,10 @@ export class SelectorController {
 				)
 			: undefined;
 		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
+		const sessionStats = this.ctx.session.sessionManager.getUsageStatistics();
+		const actualSpend = formatActualSpendSection(reports);
+		const estimatedValue = formatEstimatedTokenValue(sessionStats.cost);
+		const spendSummary = [actualSpend, estimatedValue].filter(Boolean).join("\n\n");
 		const done = () => {
 			overlayHandle?.hide();
 			this.focusActiveEditorArea();
@@ -294,15 +299,22 @@ export class SelectorController {
 		};
 		const dashboard = new UsageDashboardComponent({
 			reports,
+			spendSummary,
 			renderDetail: width =>
-				renderUsageReports(
-					reports,
-					theme,
-					Date.now(),
-					width,
-					provider => (provider === currentProvider ? activeAccount : undefined),
-					usageModelSelectors,
-				),
+				[
+					renderUsageReports(
+						reports,
+						theme,
+						Date.now(),
+						width,
+						provider => (provider === currentProvider ? activeAccount : undefined),
+						usageModelSelectors,
+					),
+					actualSpend,
+					estimatedValue,
+				]
+					.filter(Boolean)
+					.join("\n\n"),
 			loadActivity: async push => {
 				// Show whatever the stats DB already has, then re-query after an
 				// incremental session sync so the heatmap converges on fresh data.

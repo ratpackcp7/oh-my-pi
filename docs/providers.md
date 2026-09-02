@@ -87,7 +87,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `google`         | `GEMINI_API_KEY`                                                                                                                                 |
 | `google-vertex`  | `GOOGLE_CLOUD_API_KEY`, or Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS` + `GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION`) |
 | `groq`           | `GROQ_API_KEY`                                                                                                                                   |
-| `openrouter`     | `OPENROUTER_API_KEY`                                                                                                                             |
+| `openrouter`     | `OPENROUTER_API_KEY` (inference); optional `OPENROUTER_MANAGEMENT_KEY` for usage-only account credits/balance                                  |
 | `mistral`        | `MISTRAL_API_KEY`                                                                                                                                |
 | `xai`            | `XAI_API_KEY`                                                                                                                                    |
 | `xai-oauth`      | `XAI_OAUTH_TOKEN`, then `XAI_API_KEY`                                                                                                            |
@@ -95,6 +95,8 @@ Each provider has one or more environment variables that supply a key when no st
 | `cursor`         | `CURSOR_ACCESS_TOKEN`                                                                                                                            |
 | `azure`          | `AZURE_OPENAI_API_KEY`                                                                                                                           |
 | `amazon-bedrock` | `AWS_PROFILE`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or an ECS/IRSA credential chain                                                 |
+
+OpenRouter usage views keep the two key roles separate: `OPENROUTER_API_KEY` supplies authoritative per-key daily, weekly, and provider-defined monthly spend from `GET /api/v1/key`, while optional `OPENROUTER_MANAGEMENT_KEY` supplies authoritative account total usage and credits/balance from `GET /api/v1/credits`. The management key is usage-only and is never selected for inference. OpenRouter also offers management-key Analytics API breakdowns by dimensions such as model, but `/usage` does not fetch those extra analytics requests yet. An exact rolling 30-day figure is therefore not claimed from `usage_monthly`.
 
 ### Additional hosted providers
 

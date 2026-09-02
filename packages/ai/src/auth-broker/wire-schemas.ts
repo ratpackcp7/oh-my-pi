@@ -243,11 +243,28 @@ const usageResetCreditsSchema = type({
 	}).array(),
 });
 
+const actualSpendScopeSchema = type("'credential' | 'account'");
+const actualSpendWindowSchema = type({
+	id: "string",
+	label: "string",
+	amountUsd: "number",
+	scope: actualSpendScopeSchema,
+});
+const actualSpendReportSchema = type({
+	status: "'available' | 'partial' | 'unavailable'",
+	source: "string",
+	"windows?": actualSpendWindowSchema.array(),
+	"balanceUsd?": "number",
+	"balanceScope?": actualSpendScopeSchema,
+	"notes?": "string[]",
+});
+
 const arkUsageReportSchema = type({
 	provider: "string",
 	fetchedAt: "number",
 	limits: usageLimitSchema.array(),
 	"resetCredits?": usageResetCreditsSchema,
+	"actualSpend?": actualSpendReportSchema,
 	"notes?": "string[]",
 	"metadata?": { "[string]": "unknown" },
 	"raw?": "unknown",
@@ -260,6 +277,7 @@ const sanitizedUsageReportSchema = type({
 	fetchedAt: "number",
 	limits: usageLimitSchema.array(),
 	"resetCredits?": usageResetCreditsSchema,
+	"actualSpend?": actualSpendReportSchema,
 	"notes?": "string[]",
 	"metadata?": { "[string]": "unknown" },
 });

@@ -101,6 +101,34 @@ export interface UsageResetCredits {
 	credits?: UsageResetCreditDetail[];
 }
 
+/** Scope of provider-authoritative monetary data. */
+export type ActualSpendScope = "credential" | "account";
+
+/** One provider-authoritative spend total for a named time window. */
+export interface ActualSpendWindow {
+	id: string;
+	label: string;
+	amountUsd: number;
+	scope: ActualSpendScope;
+}
+
+/**
+ * Provider-authoritative monetary data. This is deliberately separate from
+ * token-priced request valuation so callers cannot accidentally sum estimates
+ * with real account charges.
+ */
+export interface ActualSpendReport {
+	status: "available" | "partial" | "unavailable";
+	/** Provider/API source that supplied the monetary data. */
+	source: string;
+	/** Time-windowed spend, when the provider exposes it. */
+	windows?: ActualSpendWindow[];
+	/** Current credits/balance remaining, in USD-equivalent provider credits. */
+	balanceUsd?: number;
+	balanceScope?: ActualSpendScope;
+	notes?: string[];
+}
+
 /** Aggregated usage report for a provider. */
 export interface UsageReport {
 	provider: Provider;
@@ -108,6 +136,8 @@ export interface UsageReport {
 	limits: UsageLimit[];
 	/** Saved rate-limit resets the account can redeem, when the provider reports them. */
 	resetCredits?: UsageResetCredits;
+	/** Provider-authoritative money actually spent/balanced; never token-price estimates. */
+	actualSpend?: ActualSpendReport;
 	/**
 	 * Provider-wide disclaimers shown once above per-account sections.
 	 * Use this for caveats that apply to every limit (e.g. "OMP-observed
@@ -339,11 +369,28 @@ export const usageResetCreditsSchema = type({
 	"credits?": usageResetCreditDetailSchema.array(),
 });
 
+export const actualSpendScopeSchema = type("'credential' | 'account'");
+export const actualSpendWindowSchema = type({
+	id: "string",
+	label: "string",
+	amountUsd: "number",
+	scope: actualSpendScopeSchema,
+});
+export const actualSpendReportSchema = type({
+	status: "'available' | 'partial' | 'unavailable'",
+	source: "string",
+	"windows?": actualSpendWindowSchema.array(),
+	"balanceUsd?": "number",
+	"balanceScope?": actualSpendScopeSchema,
+	"notes?": "string[]",
+});
+
 export const usageReportSchema = type({
 	provider: "string",
 	fetchedAt: "number",
 	limits: usageLimitSchema.array(),
 	"resetCredits?": usageResetCreditsSchema,
+	"actualSpend?": actualSpendReportSchema,
 	"notes?": "string[]",
 	"metadata?": { "[string]": "unknown" },
 	// `raw` is provider-specific and may be anything; the broker strips it before

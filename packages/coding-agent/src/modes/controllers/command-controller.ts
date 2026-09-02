@@ -386,11 +386,13 @@ export class CommandController {
 		}
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
-		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
-			info += `\n${theme.bold("Cost")}\n`;
-			if (stats.cost > 0) {
-				info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
-			}
+		if (stats.cost > 0) {
+			info += `\n${theme.bold("Estimated token value")}\n`;
+			info += `${theme.fg("dim", "Session-local:")} $${stats.cost.toFixed(4)}\n`;
+			info += `${theme.fg("dim", "If billed at configured token rates; not provider account spend.")}\n`;
+		}
+		if (normalizedPremiumRequests > 0 || stats.credits !== undefined) {
+			info += `\n${theme.bold("Usage credits")}\n`;
 			if (normalizedPremiumRequests > 0) {
 				info += `${theme.fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
 			}
@@ -510,15 +512,15 @@ export class CommandController {
 							: `${a.contextTokens.toLocaleString()}`;
 					info += `${theme.fg("dim", "Context:")} ${ctx}\n`;
 					info += `${theme.fg("dim", "Messages:")} ${a.messages.total.toLocaleString()}\n`;
-					info += `${theme.fg("dim", "Spend:")} ${a.tokens.input.toLocaleString()} in / ${a.tokens.output.toLocaleString()} out`;
-					if (a.cost > 0) info += `, $${a.cost.toFixed(4)}`;
+					info += `${theme.fg("dim", "Tokens:")} ${a.tokens.input.toLocaleString()} in / ${a.tokens.output.toLocaleString()} out`;
+					if (a.cost > 0) info += `, estimated value $${a.cost.toFixed(4)}`;
 					info += "\n";
 				}
 			}
 			if (stats.active) {
 				info += `\n${theme.bold("Totals")}\n`;
 				info += `${theme.fg("dim", "Tokens:")} ${stats.tokens.total.toLocaleString()}\n`;
-				if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
+				if (stats.cost > 0) info += `${theme.fg("dim", "Estimated value:")} $${stats.cost.toFixed(4)}\n`;
 			}
 			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
 			return;
@@ -559,13 +561,13 @@ export class CommandController {
 		} else {
 			info += `${theme.fg("dim", "Tokens:")} ${stats.contextTokens.toLocaleString()}\n`;
 		}
-		info += `\n${theme.bold("Spend")}\n`;
+		info += `\n${theme.bold("Usage")}\n`;
 		info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
 		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
 		if (stats.tokens.cacheRead > 0) {
 			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
 		}
-		if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
+		if (stats.cost > 0) info += `${theme.fg("dim", "Estimated token value:")} $${stats.cost.toFixed(4)}\n`;
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
 	}
 

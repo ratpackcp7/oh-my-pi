@@ -288,6 +288,8 @@ export function buildHeatmapLayout(points: DailyActivityPoint[], weeks: number, 
 /** Callbacks and data sources for {@link UsageDashboardComponent}. */
 export interface UsageDashboardOptions {
 	reports: UsageReport[];
+	/** Authoritative spend plus explicitly scoped local estimate, rendered above quota cards. */
+	spendSummary?: string;
 	/**
 	 * Full classic `/usage` report for the expanded detail view; re-invoked per
 	 * terminal width.
@@ -499,7 +501,7 @@ export class UsageDashboardComponent implements Component {
 			layout.totalRequests,
 		);
 		summary.push(
-			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${cost} · ${requests} requests · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : ""}`,
+			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${cost} estimated token value · ${requests} requests · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : ""}`,
 		);
 		summary.push("");
 
@@ -532,6 +534,10 @@ export class UsageDashboardComponent implements Component {
 
 	#overviewLines(innerWidth: number): string[] {
 		const lines: string[] = [];
+		if (this.#options.spendSummary) {
+			lines.push(...this.#options.spendSummary.split("\n").map(line => truncateToWidth(line, innerWidth)));
+			lines.push("");
+		}
 		lines.push(...this.#renderCardsGrid(innerWidth));
 		lines.push("");
 		lines.push(...this.#renderHeatmap(innerWidth));

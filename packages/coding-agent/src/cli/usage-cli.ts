@@ -24,6 +24,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { formatActualSpendSection } from "../usage/spend-display";
+export { formatActualSpendSection, formatEstimatedTokenValue } from "../usage/spend-display";
 
 const BAR_WIDTH = 28;
 
@@ -731,6 +733,9 @@ export function formatUsageBreakdown(
 			lines.push(`  ${chalk.dim(`capacity: ${parts.join(" · ")}`)}`);
 		}
 	}
+
+	const actualSpend = formatActualSpendSection(reports);
+	if (actualSpend) lines.push("", actualSpend);
 
 	return lines.join("\n");
 }

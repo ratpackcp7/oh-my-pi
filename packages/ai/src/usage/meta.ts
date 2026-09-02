@@ -157,6 +157,11 @@ export function parseMetaRateLimitHeaders(headers: Record<string, string>, now =
 		provider: "meta",
 		fetchedAt: now,
 		limits,
+		actualSpend: {
+			status: "unavailable",
+			source: "meta-api",
+			notes: ["Authoritative Meta/Muse billing spend is not exposed by the current usage source."],
+		},
 		metadata: {
 			source: "ratelimit-headers",
 			scope: "team",
@@ -180,6 +185,11 @@ export function parseMetaSubscriptionUsage(event: unknown, now = Date.now()): Us
 		provider: "meta",
 		fetchedAt: now,
 		limits: [windowLimit, weeklyLimit],
+		actualSpend: {
+			status: "unavailable",
+			source: "meta-subscription",
+			notes: ["Authoritative Meta/Muse billing spend is not exposed by the subscription usage event."],
+		},
 		metadata: {
 			source: "subscription-usage",
 			scope: "subscription",

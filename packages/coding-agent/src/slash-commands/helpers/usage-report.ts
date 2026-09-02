@@ -2,6 +2,7 @@ import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import type { SlashCommandRuntime } from "../types";
+import { formatActualSpendSection, formatEstimatedTokenValue } from "../../usage/spend-display";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatDuration, formatProviderName, renderAsciiBar } from "./format";
 
@@ -145,6 +146,7 @@ function renderUsageReports(
  * session-manager tallies.
  */
 export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
+	const stats = runtime.session.sessionManager.getUsageStatistics();
 	const provider = runtime.session as SlashCommandRuntime["session"] & {
 		fetchUsageReports?: () => Promise<UsageReport[] | null>;
 	};
@@ -158,13 +160,14 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 						runtime.session.sessionId,
 					)
 				: undefined;
-			return renderUsageReports(reports, Date.now(), providerId =>
+			const quotaText = renderUsageReports(reports, Date.now(), providerId =>
 				providerId === currentProvider ? activeAccount : undefined,
 			);
+			const actualSpend = formatActualSpendSection(reports);
+			return [quotaText, actualSpend, formatEstimatedTokenValue(stats.cost)].filter(Boolean).join("\n\n");
 		}
 	}
 
-	const stats = runtime.session.sessionManager.getUsageStatistics();
 	const orchestrationTokens = stats.orchestrationInput + stats.orchestrationOutput + stats.orchestrationCacheRead;
 	return [
 		"Usage",
@@ -175,6 +178,6 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		`Total tokens: ${stats.totalTokens}`,
 		...(orchestrationTokens > 0 ? [`Orchestration tokens: ${orchestrationTokens}`] : []),
 		`Premium requests: ${stats.premiumRequests}`,
-		`Cost: $${stats.cost.toFixed(6)}`,
+		formatEstimatedTokenValue(stats.cost),
 	].join("\n");
 }

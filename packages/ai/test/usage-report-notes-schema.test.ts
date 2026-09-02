@@ -55,6 +55,28 @@ describe("usage report notes wire schema", () => {
 		expect(reports[0]).toHaveProperty("notes", [PROVIDER_NOTE]);
 	});
 
+	it("both schema copies preserve provider-authoritative actual spend", () => {
+		const report = {
+			...reportWithNotes(),
+			actualSpend: {
+				status: "available" as const,
+				source: "openrouter-api",
+				windows: [{ id: "monthly", label: "Monthly", amountUsd: 2.91, scope: "credential" as const }],
+				balanceUsd: 12.75,
+				balanceScope: "account" as const,
+				notes: ["Authoritative provider data."],
+			},
+		};
+
+		const local = usageReportSchema(report);
+		expect(local).not.toBeInstanceOf(type.errors);
+		expect(local).toHaveProperty("actualSpend.balanceUsd", 12.75);
+
+		const brokered = usageResponseSchema({ generatedAt: Date.now(), reports: [report] });
+		expect(brokered).not.toBeInstanceOf(type.errors);
+		expect(brokered).toHaveProperty("reports.0.actualSpend.windows.0.amountUsd", 2.91);
+	});
+
 	it("both schema copies accept the credits unit (Z.AI GLM Coding Plan reports)", () => {
 		// `usage.ts` and `wire-schemas.ts` keep separate copies of the unit enum;
 		// a new unit added to only one copy makes broker `/v1/usage` responses

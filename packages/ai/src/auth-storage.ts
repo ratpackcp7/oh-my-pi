@@ -81,6 +81,7 @@ import {
 	pickSoonestExpiringCredit,
 } from "./usage/openai-codex-reset";
 import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "./usage/opencode-go";
+import { openrouterUsageProvider } from "./usage/openrouter";
 import { syntheticUsageProvider } from "./usage/synthetic";
 import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
@@ -687,6 +688,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	ollamaCloudUsageProvider,
 	claudeUsageProvider,
 	metaUsageProvider,
+	openrouterUsageProvider,
 	clinePassUsageProvider,
 	zaiUsageProvider,
 	umansUsageProvider,
@@ -3932,6 +3934,17 @@ export class AuthStorage {
 			const providerImpl = this.#resolveUsageProvider(provider);
 			if (!providerImpl) continue;
 			const baseUrl = options?.baseUrlResolver?.(provider);
+			if (providerId === "openrouter") {
+				const managementKey = $envExact("OPENROUTER_MANAGEMENT_KEY");
+				if (managementKey) {
+					const managementRequest = this.#buildUsageRequest(
+						provider,
+						{ type: "api_key", apiKey: managementKey },
+						baseUrl,
+					);
+					if (!providerImpl.supports || providerImpl.supports(managementRequest)) requests.push(managementRequest);
+				}
+			}
 			let entries = this.#getStoredCredentials(providerId);
 			if (entries.length > 0) {
 				const dedupedEntries = this.#pruneDuplicateStoredCredentials(providerId, entries);
