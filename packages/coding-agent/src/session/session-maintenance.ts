@@ -229,7 +229,7 @@ function mergeLlmCompactionPreserveData(
 	hookPreserveData: Record<string, unknown> | undefined,
 	resultPreserveData: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-	const preserveData = { ...(hookPreserveData ?? {}), ...(resultPreserveData ?? {}) };
+	const preserveData = { ...hookPreserveData, ...resultPreserveData };
 	return snapcompact.stripPreservedArchive(Object.keys(preserveData).length > 0 ? preserveData : undefined);
 }
 
@@ -274,7 +274,8 @@ export interface SessionMaintenanceHost {
 		task: (signal: AbortSignal) => Promise<void>,
 		options?: { delayMs?: number; generation?: number; onSkip?: (reason: "aborted" | "stale-generation") => void },
 	): void;
-	scheduleAgentContinue(options?: {
+	scheduleAgentContinue(options: {
+		source: string;
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
@@ -448,7 +449,9 @@ export class SessionMaintenance {
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
 				keepBoundaryId,
-				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
+				cacheWarmSuffixTokens:
+					this.#host.model()?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -493,6 +496,8 @@ export class SessionMaintenance {
 				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
 				keepBoundaryId,
 				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
+				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
+				suffixTokenLimit: this.#host.model()?.thinking?.prefixBinding === true ? 0 : undefined,
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -945,7 +950,18 @@ export class SessionMaintenance {
 						ctxWindow > 0
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 							: Number.POSITIVE_INFINITY;
-					if (this.#projectSnapcompactContextTokens(preparation, snapcompactResult) > budget) {
+					const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+					const reductionBaseline = this.#projectPreSnapcompactContextTokens(preparation);
+					if (projected >= reductionBaseline) {
+						logger.warn("Snapcompact projection would not reduce context", {
+							model: this.#model?.id,
+							projected,
+							reductionBaseline,
+						});
+						this.#host.emitNotice("warning", "snapcompact would not reduce context.", "compaction");
+						throw new Error("snapcompact would not reduce context locally.");
+					}
+					if (projected > budget) {
 						logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 							model: this.#model?.id,
 						});
@@ -972,7 +988,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
+				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
 			} else {
 				codexCompaction = createCodexCompactionContext({
 					trigger: "manual",
@@ -1541,6 +1557,28 @@ export class SessionMaintenance {
 		return compactionContextTokens(breakdown?.usedTokens ?? 0, localEstimate);
 	}
 
+	/**
+	 * Local pre-compaction context for a snapcompact preparation, measured on the
+	 * exact same non-message overhead and tokenizer as
+	 * {@link #projectSnapcompactContextTokens}: fixed overhead + the region that
+	 * would be archived (`messagesToSummarize` + `turnPrefixMessages`) + the kept
+	 * tail (`recentMessages`). Comparing the projection against this
+	 * self-consistent baseline isolates the single thing snapcompact changes —
+	 * the archived region becomes an imaged summary — so a result whose frames
+	 * cost more tokens than the text they replace is rejected, while genuine
+	 * reductions are not. Recomputed from the live messages rather than
+	 * `preparation.tokensBefore`, which carries only provider usage (zero for
+	 * imported sessions with no usage metadata, or a deflated figure behind a
+	 * payload-shrinking hook) and would falsely reject reducing archives (#10023).
+	 */
+	#projectPreSnapcompactContextTokens(preparation: CompactionPreparation): number {
+		let tokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
+		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize);
+		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages);
+		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		return tokens;
+	}
+
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
@@ -1596,6 +1634,8 @@ export class SessionMaintenance {
 		await this.runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
 			triggerContextTokens: contextTokens,
+			pendingContextTokens: this.#tokenizer.countMessages(messages),
+			preparedContextTokens: this.#estimateStoredContextTokens(),
 			phase: "pre_turn",
 		});
 	}
@@ -1811,7 +1851,11 @@ export class SessionMaintenance {
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
 				// Retry on the promoted (larger) model without compacting
-				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				this.#host.scheduleAgentContinue({
+					source: "context-promotion-overflow",
+					delayMs: 100,
+					generation,
+				});
 				return COMPACTION_CHECK_CONTINUATION;
 			}
 
@@ -1880,7 +1924,11 @@ export class SessionMaintenance {
 					failed: `${assistantMessage.provider}/${assistantMessage.model}`,
 					current: `${this.#model.provider}/${this.#model.id}`,
 				});
-				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				this.#host.scheduleAgentContinue({
+					source: "promoted-model-overflow",
+					delayMs: 100,
+					generation,
+				});
 				return COMPACTION_CHECK_CONTINUATION;
 			}
 		}
@@ -1903,7 +1951,11 @@ export class SessionMaintenance {
 				logger.debug("Context promotion triggered by response.incomplete (length stop)", {
 					from: `${assistantMessage.provider}/${assistantMessage.model}`,
 				});
-				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				this.#host.scheduleAgentContinue({
+					source: "context-promotion-incomplete",
+					delayMs: 100,
+					generation,
+				});
 				return COMPACTION_CHECK_CONTINUATION;
 			}
 
@@ -2830,6 +2882,10 @@ export class SessionMaintenance {
 		options: {
 			autoContinue?: boolean;
 			triggerContextTokens?: number;
+			/** Tokens from pending messages included in triggerContextTokens but absent from the prepared history. */
+			pendingContextTokens?: number;
+			/** Stored context before pending messages, measured before preparation rewrites its representation. */
+			preparedContextTokens?: number;
 			suppressContinuation?: boolean;
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
@@ -3145,6 +3201,7 @@ export class SessionMaintenance {
 						});
 					} else if (!suppressContinuation && this.#host.agent.hasQueuedMessages()) {
 						this.#host.scheduleAgentContinue({
+							source: "frame-rescue-queued-message",
 							delayMs: 100,
 							generation,
 							shouldContinue: () => this.#host.agent.hasQueuedMessages(),
@@ -3323,7 +3380,25 @@ export class SessionMaintenance {
 									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 									: Number.POSITIVE_INFINITY;
 							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
-							if (projected > budget) {
+							const reductionBaseline =
+								options.triggerContextTokens !== undefined
+									? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
+									: this.#projectPreSnapcompactContextTokens(preparation);
+							const preparedReductionBaseline =
+								options.preparedContextTokens === undefined
+									? reductionBaseline
+									: Math.max(0, reductionBaseline - options.preparedContextTokens) +
+										this.#projectPreSnapcompactContextTokens(preparation);
+							if (projected >= preparedReductionBaseline) {
+								logger.warn("Snapcompact projection would not reduce context", {
+									model: this.#model?.id,
+									projected,
+									reductionBaseline: preparedReductionBaseline,
+								});
+								snapcompactBlocker =
+									"snapcompact would not reduce context; trying the next preferred compaction method.";
+								snapcompactResult = undefined;
+							} else if (projected > budget) {
 								logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 									model: this.#model?.id,
 									projected,
@@ -3377,7 +3452,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
+				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
 			} else {
 				const candidates = this.#getCompactionModelCandidates(
 					availableModels,
@@ -3814,7 +3889,11 @@ export class SessionMaintenance {
 		);
 
 		if (retryFits) {
-			this.#host.scheduleAgentContinue({ delayMs: 100, generation: args.generation });
+			this.#host.scheduleAgentContinue({
+				source: "compaction-retry",
+				delayMs: 100,
+				generation: args.generation,
+			});
 			continuationScheduled = true;
 		} else {
 			continuationScheduled = this.#host.scheduleCompactionContinuation({
@@ -3952,7 +4031,11 @@ export class SessionMaintenance {
 						(reason === "incomplete" && lastAssistant.stopReason === "length");
 					if (shouldDrop) this.#host.agent.replaceMessages(messages.slice(0, -1));
 				}
-				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				this.#host.scheduleAgentContinue({
+					source: "shake-retry",
+					delayMs: 100,
+					generation,
+				});
 				continuationScheduled = true;
 			} else {
 				continuationScheduled = this.#host.scheduleCompactionContinuation({

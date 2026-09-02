@@ -7,6 +7,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
 	type ComposerStyle,
@@ -15,14 +16,14 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { adjustHsv, formatNumber, getProjectDir, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { adjustHsv, formatNumber, getProjectDir, hexToRgb, pathIsWithin, rgbToHex } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
-import * as git from "../../../utils/git";
-import * as jj from "../../../utils/jj";
+import { withTimeoutSignal } from "../../../utils/fetch-timeout";
+import { GH_COMMAND_TIMEOUT_MS, github } from "../../../utils/github";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { calculateTokensPerSecond } from "../../../utils/token-rate";
 import { sanitizeStatusText } from "../../shared";
@@ -46,14 +47,19 @@ import type {
 } from "./types";
 
 const JJ_REFRESH_TTL_MS = 5000;
+const JJ_COMMAND_TIMEOUT_MS = 5_000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 const TIME_SPENT_TICK_MS = 1000;
+/** Brand-color fade duration across working-state edges (rust omp's `BRAND_FADE`). */
+const BRAND_FADE_MS = 450;
+/** Repaint cadence while the brand fade is in flight (rust omp's `FADE_FRAME`). */
+const BRAND_FADE_FRAME_MS = 40;
 
 /** A displayable limit after provider, account, model, and window filtering. */
 interface UsageWindowCandidate {
 	id?: string;
 	/** Canonical 5h/7d/monthly bucket, when this candidate maps onto one. */
-	windowClass?: "5h" | "7d" | "monthly";
+	windowClass?: "5h" | "daily" | "7d" | "monthly";
 	/** Dedup key for the generic labeled-window fallback (e.g. antigravity's Daily/Weekly). */
 	windowKey?: string;
 	label?: string;
@@ -269,7 +275,7 @@ interface WorktreeContext {
  * resolve to the shared `foo.git` dir, so a trailing `.git` is stripped.
  */
 function resolveWorktreeContext(cwd: string): WorktreeContext | null {
-	const worktree = git.repo.linkedWorktreeSync(cwd);
+	const worktree = vcs.git(cwd)?.linkedWorktree();
 	if (!worktree) return null;
 	const base = path.basename(worktree.primaryRoot);
 	const projectName = base.endsWith(".git") ? base.slice(0, -4) : base;
@@ -333,6 +339,11 @@ function removeContextSegments(parts: string[], segments: StatusLineSegmentId[])
 function formatEmbeddedContextPercent(percent: number): string {
 	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
+
+function embeddedContextGaugeMinWidth(percent: number, contextWindow: number): number {
+	return formatEmbeddedContextPercent(percent).length + formatNumber(contextWindow).length + 4;
+}
+
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("git");
 }
@@ -413,6 +424,7 @@ function wrappedStatusPriority(id: StatusLineSegmentId | undefined): number {
 
 export class StatusLineComponent implements Component {
 	#standalone: false | "full" | "left-only" = false;
+	#topAttachment: ComposerStyle["statusAttachment"] = "top-border";
 	#standaloneGap = false;
 	#autocompleteActiveProbe: (() => boolean) | undefined;
 	#renderRevision = 0;
@@ -421,7 +433,6 @@ export class StatusLineComponent implements Component {
 	#cachedBranch: string | null | undefined = undefined;
 	#cachedBranchRepoId: string | null | undefined = undefined;
 	#cachedBranchCwd: string | undefined = undefined;
-	#cachedBranchHasGitRepository = false;
 	// In-flight reftable resolve slot. Ownership is the launch id, not the cwd:
 	// two live resolves can share a cwd string across an invalidation, and a
 	// stale one must never free (or poison) a slot it no longer owns.
@@ -432,7 +443,7 @@ export class StatusLineComponent implements Component {
 	// launch; a mismatch on resolve means the cache was invalidated underneath
 	// it (a newer resolve superseded it), so its result is stale and must be
 	// dropped rather than overwrite the value the newer resolve committed.
-	// Mirrors #jjCacheGeneration / #getJjBranch in this file.
+	// Mirrors #jjCacheGeneration / #getBranchLabel in this file.
 	// Timestamp of the latest branch read; only bounds cache freshness when the
 	// HEAD watcher could not be installed.
 	#branchLastFetch: number | undefined = undefined;
@@ -441,7 +452,7 @@ export class StatusLineComponent implements Component {
 	// launch; a mismatch on resolve means the cache was invalidated underneath
 	// it (a newer resolve superseded it), so its result is stale and must be
 	// dropped rather than overwrite the value the newer resolve committed.
-	// Mirrors #jjCacheGeneration / #getJjBranch in this file.
+	// Mirrors #jjCacheGeneration / #getBranchLabel in this file.
 	#branchCacheGeneration = 0;
 	#gitUnwatch: (() => void) | null = null;
 	#gitWatcherUnavailable = false;
@@ -451,8 +462,15 @@ export class StatusLineComponent implements Component {
 	/** Pulse timer for the running-speculation indicator; live only while speculation runs. */
 	#speculationBlinkTimer: NodeJS.Timeout | undefined;
 	#speculationBlinkOn = true;
+	/** In-flight brand-color fade across a working-state edge; null when settled. */
+	#brandFade: { fromHex: string; toHex: string; startedAt: number } | null = null;
+	/** Working flag as of the last brand render, for edge detection. */
+	#brandWorking = false;
+	/** Frame timer driving repaints while the brand fade is unsettled. */
+	#brandFadeTimer: NodeJS.Timeout | undefined;
 	#hookStatuses: Map<string, string> = new Map();
 	#subagentCount: number = 0;
+	#runningSubagentIds = new Set<string>();
 	/**
 	 * Current-turn elapsed accounting for the `time_spent` segment, keyed per
 	 * {@link AgentSession} so the focus-controller mid-turn attach path
@@ -492,8 +510,6 @@ export class StatusLineComponent implements Component {
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
 	#gitStatusInFlightCwd: string | undefined = undefined;
-	#jjRoot: string | null | undefined = undefined;
-	#jjRootCwd: string | undefined = undefined;
 	#cachedJjBranch: string | null = null;
 	#jjBranchLastFetch = 0;
 	#jjResolveSeq = 0;
@@ -501,7 +517,7 @@ export class StatusLineComponent implements Component {
 	#cachedJjStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#jjStatusLastFetch = 0;
 	#jjStatusActive: JjResolveRequest | undefined = undefined;
-	// Bumped on every jj-cache reset — a cwd switch (#jjRootFor) or a HEAD /
+	// Bumped on every jj-cache reset — a cwd switch (#applyCwdChange) or a HEAD /
 	// bookmark move (#invalidateGitCaches). An in-flight jj query captures this
 	// at launch; a mismatch on resolve means the caches were reset underneath it
 	// (including a reset that re-resolves to the SAME root, which a root-equality
@@ -523,6 +539,7 @@ export class StatusLineComponent implements Component {
 		tier?: string;
 		windows?: Array<{ label: string; percent: number; resetMs?: number }>;
 		fiveHour?: { percent: number; resetMinutes?: number };
+		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null = null;
@@ -588,7 +605,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		const classification = classifyProjectDir(projectDir);
-		const repository = classification.scratch ? git.repo.resolveSync(projectDir) : null;
+		const repository = classification.scratch ? vcs.gitInfo(projectDir) : null;
 		const suppressVcs = Boolean(
 			classification.root && repository && !pathIsWithin(classification.root, repository.repoRoot),
 		);
@@ -661,8 +678,9 @@ export class StatusLineComponent implements Component {
 		this.#autoCompactEnabled = enabled;
 	}
 
-	setSubagentCount(count: number): void {
-		this.#subagentCount = count;
+	setRunningSubagents(agentIds: readonly string[]): void {
+		this.#subagentCount = agentIds.length;
+		this.#runningSubagentIds = new Set(agentIds);
 	}
 
 	/**
@@ -769,6 +787,14 @@ export class StatusLineComponent implements Component {
 		}, TIME_SPENT_TICK_MS);
 		this.#activityTick.unref?.();
 	}
+	/**
+	 * Elapsed ms of the currently-open active-processing window, or null when
+	 * idle. Feeds the `pi` segment's working spinner + turn timer.
+	 */
+	getTurnElapsedMs(): number | null {
+		const startedAt = this.#meter().activeStartedAt;
+		return startedAt === null ? null : Math.max(0, Date.now() - startedAt);
+	}
 
 	/**
 	 * Return (lazily creating) the meter for the currently-attached
@@ -858,7 +884,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		const { effectiveGitCwd } = this.#resolveActiveRepoCache();
-		const repository = git.repo.resolveSync(effectiveGitCwd);
+		const repository = vcs.repo(effectiveGitCwd);
 		if (!repository) {
 			// There is no path to watch yet. Cache the negative result only for the
 			// fallback poll interval so a later `git init` becomes visible without
@@ -867,15 +893,10 @@ export class StatusLineComponent implements Component {
 			return;
 		}
 
-		// git swaps HEAD via `HEAD.lock` + atomic rename. That both unlinks the
-		// HEAD inode (freezing a file-bound `fs.watch` after the first switch —
-		// issue #8412) and, on Bun/Linux, permanently wedges an inotify-backed
-		// directory watch after the first rename event (oven-sh/bun#24875).
-		// `git.head.watch` stat-polls the HEAD path (or the reftable dir), which
-		// survives inode swaps on every platform. A vanished repo surfaces as a
-		// stat change too, so there is no separate watcher error path.
+		// Backends atomically replace their head markers, so stat-poll the
+		// backend-selected target instead of binding a watcher to one inode.
 		try {
-			const unwatch = git.head.watch(repository, () => {
+			const unwatch = vcs.watch(repository, () => {
 				if (this.#disposed || this.#gitUnwatch !== unwatch) return;
 				this.invalidateGitCaches();
 				this.#onBranchChange?.();
@@ -901,6 +922,7 @@ export class StatusLineComponent implements Component {
 		this.#onActivityTick = null;
 		this.#clearActivityTick();
 		this.#stopSpeculationBlink();
+		this.#stopBrandFadeTimer();
 		this.#clearUsageStartTimer();
 		this.#onCodexResetFireworks = undefined;
 		this.#codexResetSnapshots.clear();
@@ -930,6 +952,76 @@ export class StatusLineComponent implements Component {
 		clearInterval(this.#speculationBlinkTimer);
 		this.#speculationBlinkTimer = undefined;
 		this.#speculationBlinkOn = true;
+	}
+	/**
+	 * Foreground ANSI for the `pi` brand segment: dim gray while idle, fading
+	 * to the accent (session accent when enabled, else theme accent) while a
+	 * turn runs — a port of rust omp's status-band brand fade (450ms cubic
+	 * ease-in-out). A working-state edge retargets the tween from the color
+	 * currently on screen, so interrupting a running fade never jumps, and arms
+	 * a 40ms frame timer so the fade keeps animating after the working loader
+	 * (the usual repaint driver) has stopped.
+	 */
+	#brandFgAnsi(working: boolean, sessionAccentEnabled: boolean): string {
+		const sessionName = sessionAccentEnabled ? this.session.sessionManager?.getSessionName() : undefined;
+		const idleHex = theme.getColorHex("dim");
+		const workingHex =
+			(sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : undefined) ??
+			theme.getColorHex("accent");
+		const now = Date.now();
+		if (working !== this.#brandWorking) {
+			const previousTargetHex = this.#brandWorking ? workingHex : idleHex;
+			this.#brandFade = {
+				fromHex: this.#sampleBrandHex(previousTargetHex, now),
+				toHex: working ? workingHex : idleHex,
+				startedAt: now,
+			};
+			this.#brandWorking = working;
+			this.#startBrandFadeTimer();
+		}
+		const hex = this.#sampleBrandHex(working ? workingHex : idleHex, now);
+		return getSessionAccentAnsi(hex) ?? theme.getFgAnsi(working ? "accent" : "dim");
+	}
+
+	/**
+	 * The brand hex at `now`: the eased blend while a fade is in flight,
+	 * otherwise `settledHex`. A fade past its deadline is cleared here so the
+	 * next frame timer tick shuts the timer down.
+	 */
+	#sampleBrandHex(settledHex: string, now: number): string {
+		const fade = this.#brandFade;
+		if (!fade) return settledHex;
+		const t = (now - fade.startedAt) / BRAND_FADE_MS;
+		if (t >= 1) {
+			this.#brandFade = null;
+			return settledHex;
+		}
+		// Cubic ease-in-out, matching rust omp's Easing::EaseInOut.
+		const eased = t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
+		const from = hexToRgb(fade.fromHex);
+		const to = hexToRgb(fade.toHex);
+		return rgbToHex({
+			r: Math.round(from.r + (to.r - from.r) * eased),
+			g: Math.round(from.g + (to.g - from.g) * eased),
+			b: Math.round(from.b + (to.b - from.b) * eased),
+		});
+	}
+
+	#startBrandFadeTimer(): void {
+		if (this.#brandFadeTimer || this.#disposed) return;
+		this.#brandFadeTimer = setInterval(() => {
+			const fade = this.#brandFade;
+			if (!fade || Date.now() - fade.startedAt >= BRAND_FADE_MS) this.#stopBrandFadeTimer();
+			// One trailing repaint after the stop paints the settled color.
+			this.invalidate();
+			this.#onBranchChange?.();
+		}, BRAND_FADE_FRAME_MS);
+	}
+
+	#stopBrandFadeTimer(): void {
+		if (!this.#brandFadeTimer) return;
+		clearInterval(this.#brandFadeTimer);
+		this.#brandFadeTimer = undefined;
 	}
 
 	#clearUsageStartTimer(): void {
@@ -974,7 +1066,6 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranch = undefined;
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedBranchCwd = undefined;
-		this.#cachedBranchHasGitRepository = false;
 		// Abort before releasing the in-flight slot. Releasing alone would allow
 		// repeated invalidations to fan out still-running git subprocesses.
 		this.#branchResolveActive?.controller.abort();
@@ -984,10 +1075,8 @@ export class StatusLineComponent implements Component {
 		this.#cachedPrContext = undefined;
 		// jj label/status share the git segment's lifecycle: a HEAD move (e.g. a
 		// colocated `jj new`/bookmark move) must drop the throttled jj caches too,
-		// mirroring #jjRootFor's per-cwd reset so the next render refetches.
+		// so the next render refetches.
 		this.#resetJjRequests();
-		this.#jjRoot = undefined;
-		this.#jjRootCwd = undefined;
 		this.#cachedJjBranch = null;
 		this.#jjBranchLastFetch = 0;
 		this.#cachedJjStatus = null;
@@ -1018,10 +1107,42 @@ export class StatusLineComponent implements Component {
 		this.#jjStatusActive?.controller.abort();
 		this.#jjStatusActive = undefined;
 	}
-	#getCurrentBranch(effectiveGitCwd?: string): string | null {
+	#getBranchLabel(effectiveGitCwd?: string): string | null {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		const repository = vcs.repo(gitCwd);
+		if (!repository) return null;
+		const gitRepository = repository.asGit();
+		if (!gitRepository) {
+			if (this.#jjBranchActive || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
+				return this.#cachedJjBranch;
+			}
+			const request: JjResolveRequest = {
+				id: ++this.#jjResolveSeq,
+				controller: new AbortController(),
+			};
+			this.#jjBranchActive = request;
+			const generation = this.#jjCacheGeneration;
+			(async () => {
+				let next: string | null = null;
+				try {
+					next =
+						(await repository.label(withTimeoutSignal(JJ_COMMAND_TIMEOUT_MS, request.controller.signal))) ?? null;
+				} catch {
+					next = null;
+				} finally {
+					if (this.#jjBranchActive?.id === request.id) this.#jjBranchActive = undefined;
+					if (this.#jjCacheGeneration === generation) this.#jjBranchLastFetch = Date.now();
+				}
+				if (this.#jjCacheGeneration !== generation || this.#disposed) return;
+				const changed = next !== this.#cachedJjBranch;
+				this.#cachedJjBranch = next;
+				if (changed) this.#onBranchChange?.();
+			})();
+			return this.#cachedJjBranch;
+		}
+
 		const fallbackCacheExpired =
 			this.#gitWatcherUnavailable &&
 			(this.#branchLastFetch === undefined || Date.now() - this.#branchLastFetch >= WATCHER_FAILURE_POLL_TTL_MS);
@@ -1033,9 +1154,9 @@ export class StatusLineComponent implements Component {
 		// `git rev-parse` — the unbounded spawn that froze the render path (F7).
 		// A non-reftable repo resolves HEAD with cheap sync filesystem reads, so
 		// only the reftable branch moves off the render path, mirroring
-		// #getGitStatus and #getJjBranch in this file.
-		const repository = git.repo.resolveSync(gitCwd);
-		if (repository && git.repo.isReftableSync(repository)) {
+		// #getStatus and the Jujutsu label path above.
+		const repoInfo = vcs.gitInfo(gitCwd);
+		if (repoInfo?.isReftable) {
 			if (this.#branchResolveActive !== undefined) {
 				return this.#branchResolveActive.cwd === gitCwd && this.#cachedBranchCwd === gitCwd
 					? (this.#cachedBranch ?? null)
@@ -1052,19 +1173,15 @@ export class StatusLineComponent implements Component {
 			// start while this one is still pending. Without a generation check the
 			// older resolve would finish later, install its stale HEAD, and clear the
 			// slot — dropping the fresh result and freezing the status line on the
-			// pre-change branch. Mirrors #jjCacheGeneration / #getJjBranch.
+			// pre-change branch. Mirrors #jjCacheGeneration / #getBranchLabel.
 			const generation = this.#branchCacheGeneration;
 			(async () => {
 				let next: string | null = null;
 				let repoId: string | null = null;
 				try {
-					const headState = await git.head.resolve(gitCwd, request.controller.signal);
-					repoId = headState?.headPath ?? null;
-					next = !headState
-						? null
-						: headState.kind === "ref"
-							? (headState.branchName ?? headState.ref)
-							: "detached";
+					const headState = await gitRepository.head(request.controller.signal);
+					repoId = repoInfo.headPath;
+					next = headState.kind === "ref" ? (headState.branch ?? headState.refName ?? "HEAD") : "detached";
 				} catch {
 					next = null;
 				} finally {
@@ -1080,7 +1197,6 @@ export class StatusLineComponent implements Component {
 				const prev = this.#cachedBranchCwd === gitCwd ? this.#cachedBranch : undefined;
 				this.#cachedBranchCwd = gitCwd;
 				this.#cachedBranchRepoId = repoId;
-				this.#cachedBranchHasGitRepository = next === null;
 				this.#cachedBranch = next;
 				this.#branchLastFetch = Date.now();
 				if (prev !== next && this.#onBranchChange) this.#onBranchChange();
@@ -1089,8 +1205,14 @@ export class StatusLineComponent implements Component {
 		}
 
 		// Non-reftable: cheap sync filesystem read, safe on the render path.
-		const head = git.head.resolveSync(gitCwd);
-		const gitHeadPath = head?.headPath ?? null;
+		const head = (() => {
+			try {
+				return gitRepository.headSync();
+			} catch {
+				return null;
+			}
+		})();
+		const gitHeadPath = repoInfo?.headPath ?? null;
 		this.#cachedBranchCwd = gitCwd;
 		this.#cachedBranchRepoId = gitHeadPath;
 		this.#branchLastFetch = Date.now();
@@ -1098,7 +1220,7 @@ export class StatusLineComponent implements Component {
 			this.#cachedBranch = null;
 			return null;
 		}
-		this.#cachedBranch = head.kind === "ref" ? (head.branchName ?? head.ref) : "detached";
+		this.#cachedBranch = head.kind === "ref" ? (head.branch ?? head.refName ?? "HEAD") : "detached";
 		return this.#cachedBranch ?? null;
 	}
 
@@ -1112,7 +1234,7 @@ export class StatusLineComponent implements Component {
 			this.#defaultBranch = "main";
 			const lookupCwd = effectiveGitCwd;
 			(async () => {
-				const resolved = await git.branch.default(lookupCwd);
+				const resolved = await vcs.git(lookupCwd)?.defaultBranch();
 				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd) return;
 				if (resolved) {
 					this.#defaultBranch = resolved;
@@ -1125,10 +1247,42 @@ export class StatusLineComponent implements Component {
 		return branch === this.#defaultBranch;
 	}
 
-	#getGitStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
+	#getStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		const repository = vcs.repo(gitCwd);
+		if (!repository) return null;
+		if (repository.kind() === "jj") {
+			if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
+				return this.#cachedJjStatus;
+			}
+			const request: JjResolveRequest = {
+				id: ++this.#jjResolveSeq,
+				controller: new AbortController(),
+			};
+			this.#jjStatusActive = request;
+			const generation = this.#jjCacheGeneration;
+			(async () => {
+				let next: { staged: number; unstaged: number; untracked: number } | null = null;
+				try {
+					next = await repository.statusSummary(
+						withTimeoutSignal(JJ_COMMAND_TIMEOUT_MS, request.controller.signal),
+					);
+				} catch {
+					next = null;
+				} finally {
+					if (this.#jjStatusActive?.id === request.id) this.#jjStatusActive = undefined;
+					if (this.#jjCacheGeneration === generation) this.#jjStatusLastFetch = Date.now();
+				}
+				if (this.#jjCacheGeneration !== generation || this.#disposed) return;
+				const prev = this.#cachedJjStatus;
+				this.#cachedJjStatus = next;
+				if (JSON.stringify(prev) !== JSON.stringify(next)) this.#onBranchChange?.();
+			})();
+			return this.#cachedJjStatus;
+		}
+
 		if (this.#gitStatusInFlightCwd !== undefined) {
 			return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 		}
@@ -1141,7 +1295,7 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 			try {
-				nextStatus = await git.status.summary(gitCwd);
+				nextStatus = (await repository.statusSummary()) ?? null;
 			} catch {
 				nextStatus = null;
 			} finally {
@@ -1161,102 +1315,12 @@ export class StatusLineComponent implements Component {
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 	}
 
-	// Resolve (and cache per cwd) the jj workspace root, resetting both jj caches
-	// on a cwd change so a directory switch refetches label + status.
-	#jjRootFor(cwd: string): string | null {
-		if (this.#jjRoot === undefined || this.#jjRootCwd !== cwd) {
-			this.#jjRootCwd = cwd;
-			this.#jjRoot = jj.repo.rootSync(cwd);
-			this.#cachedJjBranch = null;
-			this.#jjBranchLastFetch = 0;
-			this.#cachedJjStatus = null;
-			this.#jjStatusLastFetch = 0;
-			this.#jjCacheGeneration++;
-		}
-		return this.#jjRoot;
-	}
-
-	// jj working-copy bookmark label (nearest bookmark, change-id fallback), shown
-	// in the `git` segment where git HEAD is detached/absent under jj. Throttled,
-	// cached, and repaints on resolve.
-	#getJjBranch(effectiveGitCwd?: string): string | null {
-		const cwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const root = this.#jjRootFor(cwd);
-		if (!root) return null;
-		if (this.#jjBranchActive || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
-			return this.#cachedJjBranch;
-		}
-		const request: JjResolveRequest = {
-			id: ++this.#jjResolveSeq,
-			controller: new AbortController(),
-		};
-		this.#jjBranchActive = request;
-		const generation = this.#jjCacheGeneration;
-		(async () => {
-			let next: string | null = null;
-			try {
-				next = await jj.workingCopy.label(root, {
-					signal: request.controller.signal,
-					timeoutMs: jj.JJ_COMMAND_TIMEOUT_MS,
-				});
-			} finally {
-				if (this.#jjBranchActive?.id === request.id) this.#jjBranchActive = undefined;
-				// Advance the throttle only if no reset raced this query; a reset
-				// leaves LastFetch at 0 so the current root refetches instead of
-				// being throttled on a superseded result.
-				if (this.#jjCacheGeneration === generation) this.#jjBranchLastFetch = Date.now();
-			}
-			// Drop a result whose caches were reset mid-flight — a repo switch OR a
-			// same-root HEAD/bookmark move — so a superseded label never lands in
-			// the live cache.
-			if (this.#jjCacheGeneration !== generation || this.#disposed) return;
-			const changed = next !== this.#cachedJjBranch;
-			this.#cachedJjBranch = next;
-			if (changed) this.#onBranchChange?.();
-		})();
-		return this.#cachedJjBranch;
-	}
-
-	// jj working-copy status counts (`@` vs its parent), used in place of git
-	// status in a jj repo where `git status` has no `.git` to read. Throttled,
-	// cached, and repaints on resolve like #getJjBranch.
-	#getJjStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
-		const cwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const root = this.#jjRootFor(cwd);
-		if (!root) return null;
-		if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
-			return this.#cachedJjStatus;
-		}
-		const request: JjResolveRequest = {
-			id: ++this.#jjResolveSeq,
-			controller: new AbortController(),
-		};
-		this.#jjStatusActive = request;
-		const generation = this.#jjCacheGeneration;
-		(async () => {
-			let next: { staged: number; unstaged: number; untracked: number } | null = null;
-			try {
-				next = await jj.status.summary(root, {
-					signal: request.controller.signal,
-					timeoutMs: jj.JJ_COMMAND_TIMEOUT_MS,
-				});
-			} finally {
-				if (this.#jjStatusActive?.id === request.id) this.#jjStatusActive = undefined;
-				if (this.#jjCacheGeneration === generation) this.#jjStatusLastFetch = Date.now();
-			}
-			if (this.#jjCacheGeneration !== generation || this.#disposed) return;
-			const prev = this.#cachedJjStatus;
-			this.#cachedJjStatus = next;
-			if (JSON.stringify(prev) !== JSON.stringify(next)) this.#onBranchChange?.();
-		})();
-		return this.#cachedJjStatus;
-	}
-
 	#lookupPr(effectiveGitCwd?: string): { number: number; url: string } | null {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const branch = this.#getCurrentBranch(gitCwd);
+		if (vcs.repo(gitCwd)?.kind() !== "git") return null;
+		const branch = this.#getBranchLabel(gitCwd);
 		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
 
 		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
@@ -1284,7 +1348,7 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			// Helper: only write cache if branch/repo context hasn't changed since launch
 			const setCachedPr = (value: { number: number; url: string } | null) => {
-				const latestBranch = this.#getCurrentBranch(lookupCwd);
+				const latestBranch = this.#getBranchLabel(lookupCwd);
 				const latestContext = latestBranch
 					? createPrCacheContext(latestBranch, this.#cachedBranchRepoId ?? null)
 					: undefined;
@@ -1299,10 +1363,10 @@ export class StatusLineComponent implements Component {
 				// hard-terminates on the git command deadline instead of stalling
 				// the status-line indefinitely (#4234). Requires `gh repo set-default`;
 				// non-zero exit still falls through to the null cache below.
-				const result = await git.github.run(
+				const result = await github.run(
 					lookupCwd,
 					["pr", "view", "--json", "number,url"],
-					AbortSignal.timeout(git.GIT_COMMAND_TIMEOUT_MS),
+					AbortSignal.timeout(GH_COMMAND_TIMEOUT_MS),
 				);
 				if (this.#disposed) return;
 				if (result.exitCode !== 0) {
@@ -1600,6 +1664,7 @@ export class StatusLineComponent implements Component {
 		tier?: string;
 		windows?: Array<{ label: string; percent: number; resetMs?: number }>;
 		fiveHour?: { percent: number; resetMinutes?: number };
+		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null {
@@ -1677,11 +1742,15 @@ export class StatusLineComponent implements Component {
 				const subscriptionWindow =
 					windowId === "5h" || windowId === "7d"
 						? windowId
-						: durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000
-							? "5h"
-							: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
-								? "7d"
-								: undefined;
+						: windowId === "daily" || windowId === "24h" || windowId === "1d"
+							? "daily"
+							: durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000
+								? "5h"
+								: durationMs !== undefined && Math.abs(durationMs - 86_400_000) <= 60_000
+									? "daily"
+									: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
+										? "7d"
+										: undefined;
 				const windowClass =
 					subscriptionWindow ??
 					((activeProvider === "cursor" || activeProvider === "opencode-go") &&
@@ -1700,7 +1769,12 @@ export class StatusLineComponent implements Component {
 				const modelId = normalizeUsageScopeValue(l.scope?.modelId);
 				if (modelId && modelId !== normalizedActiveModelId) continue;
 				const rawTier = l.scope?.tier;
-				const tier = typeof rawTier === "string" && rawTier.trim() ? rawTier.trim() : undefined;
+				const rawPlanType = usageReport.metadata?.planType;
+				// Scoped tiers (Claude Fable, Codex Spark) win; plan-wide tiers
+				// (Z.AI `pro`, Codex `pro`) label otherwise-untiered windows.
+				const tier =
+					(typeof rawTier === "string" && rawTier.trim() ? rawTier.trim() : undefined) ??
+					(typeof rawPlanType === "string" && rawPlanType.trim() ? rawPlanType.trim() : undefined);
 				const normalizedTier = normalizeUsageScopeValue(tier);
 				const scopeKey = usedRankingStrategy ? `ranked:${provider}` : `${modelId ?? ""}\0${normalizedTier ?? ""}`;
 				// Exact-model groups outrank provider-wide groups; within either
@@ -1732,6 +1806,7 @@ export class StatusLineComponent implements Component {
 		if (!selectedGroup) return null;
 
 		let fiveHour: { percent: number; resetMinutes?: number } | undefined;
+		let daily: { percent: number; resetMinutes?: number } | undefined;
 		let sevenDay: { percent: number; resetHours?: number } | undefined;
 		let monthly: { percent: number; resetHours?: number } | undefined;
 		let monthlyPriority = Number.POSITIVE_INFINITY;
@@ -1739,6 +1814,15 @@ export class StatusLineComponent implements Component {
 		for (const candidate of selectedGroup.candidates) {
 			if (candidate.windowClass === "5h" && !fiveHour) {
 				fiveHour = {
+					percent: candidate.fraction * 100,
+					resetMinutes:
+						typeof candidate.resetsAt === "number"
+							? Math.max(0, Math.round((candidate.resetsAt - now) / 60_000))
+							: undefined,
+				};
+			}
+			if (candidate.windowClass === "daily" && !daily) {
+				daily = {
 					percent: candidate.fraction * 100,
 					resetMinutes:
 						typeof candidate.resetsAt === "number"
@@ -1776,11 +1860,12 @@ export class StatusLineComponent implements Component {
 				});
 			}
 		}
-		if (windows.size === 0 && !fiveHour && !sevenDay && !monthly) return null;
+		if (windows.size === 0 && !fiveHour && !daily && !sevenDay && !monthly) return null;
 		return {
 			tier: selectedGroup.tier,
 			windows: windows.size > 0 ? Array.from(windows.values()) : undefined,
 			fiveHour,
+			daily,
 			sevenDay,
 			monthly,
 		};
@@ -1894,32 +1979,18 @@ export class StatusLineComponent implements Component {
 			? this.#resolveActiveRepoCache()
 			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, suppressVcs: false, worktree: null };
 		const vcsVisible = !activeRepoCache.suppressVcs;
-		let gitBranch =
-			vcsVisible && (includeGit || includePr) ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
-		// A jj repo has no git branch to read: git HEAD is detached (colocated) or
-		// absent. A pending reftable resolve owns this cwd as an explicit Git repo,
-		// so it must not be mistaken for an absent Git checkout and fall through to
-		// an ancestor jj workspace.
-		const gitHeadResolvePending = this.#branchResolveActive?.cwd === activeRepoCache.effectiveGitCwd;
-		const gitHeadIsJjLike =
-			!this.#cachedBranchHasGitRepository &&
-			!gitHeadResolvePending &&
-			(gitBranch === "detached" || gitBranch === null);
-		if (vcsVisible && includeGit && gitHeadIsJjLike) {
-			gitBranch = this.#getJjBranch(activeRepoCache.effectiveGitCwd) ?? gitBranch;
-		}
-		const gitStatus =
-			vcsVisible && includeGit
-				? ((gitHeadIsJjLike ? this.#getJjStatus(activeRepoCache.effectiveGitCwd) : null) ??
-					this.#getGitStatus(activeRepoCache.effectiveGitCwd))
-				: null;
+		const gitBranch =
+			vcsVisible && (includeGit || includePr) ? this.#getBranchLabel(activeRepoCache.effectiveGitCwd) : null;
+		const gitStatus = vcsVisible && includeGit ? this.#getStatus(activeRepoCache.effectiveGitCwd) : null;
 		const gitPr = vcsVisible && includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);
+		const sessionAccentEnabled = this.#resolveSettings().sessionAccent !== false;
+		const turnElapsedMs = this.getTurnElapsedMs();
 		return {
 			session: this.session,
 			focusedAgentId: this.#focusedAgentId,
-			sessionAccent: this.#resolveSettings().sessionAccent !== false,
+			sessionAccent: sessionAccentEnabled,
 			previewTitle,
 			activeRepo: activeRepoCache.activeRepo,
 			width,
@@ -1943,6 +2014,8 @@ export class StatusLineComponent implements Component {
 			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
 			activeMs: this.getActiveMs(),
+			turnElapsedMs,
+			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled),
 			git: {
 				branch: gitBranch,
 				status: gitStatus,
@@ -2001,9 +2074,11 @@ export class StatusLineComponent implements Component {
 	}
 
 	/**
-	 * Build the status bar for one of four layouts:
+	 * Build the status bar for one of five layouts:
 	 * - `box`: powerline groups joined by the context-reactive gauge line
 	 *   (embedded in the editor's top border).
+	 * - `band`: the box layout opened by a soft flush-left cap, for the band
+	 *   composer's frameless full-width top row.
 	 * - `plain-full`: no background, no powerline caps, dot separators, gap is
 	 *   plain spaces — the standalone bottom bar for pi/borderless composers.
 	 * - `plain-left`: left segments only (claude composer; the right group
@@ -2015,11 +2090,11 @@ export class StatusLineComponent implements Component {
 	 */
 	#buildStatusLine(
 		width: number,
-		layout: "box" | "plain-full" | "plain-left" | "plain-right" = "box",
+		layout: "box" | "band" | "plain-full" | "plain-left" | "plain-right" = "box",
 		previewTitle?: string,
 	): string {
 		const effectiveSettings = this.#resolveSettings();
-		const plain = layout !== "box";
+		const plain = layout !== "box" && layout !== "band";
 		const includePath =
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
 		const gitEnabled = this.#gitEnabled();
@@ -2062,6 +2137,8 @@ export class StatusLineComponent implements Component {
 		const leftSegmentIds = layout === "plain-right" ? [] : effectiveSettings.leftSegments;
 		for (const segId of leftSegmentIds) {
 			if (subagentBadge && segId === "subagents") continue;
+			// The band composer relocates the title to the working row's trailer.
+			if (layout === "band" && segId === "session_name") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				leftParts.push(rendered.content);
@@ -2074,6 +2151,7 @@ export class StatusLineComponent implements Component {
 		const rightSegmentIds = layout === "plain-left" ? [] : effectiveSettings.rightSegments;
 		for (const segId of rightSegmentIds) {
 			if (subagentBadge && segId === "subagents") continue;
+			if (layout === "band" && segId === "session_name") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				rightParts.push(rendered.content);
@@ -2095,7 +2173,15 @@ export class StatusLineComponent implements Component {
 		}
 
 		if (layout !== "plain-left") {
-			const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
+			// Count task jobs only until their AgentRegistry ref appears. Once it is
+			// running, the subagent badge represents that same agent; bash and eval
+			// jobs always remain independent background work.
+			const runningBackgroundJobs =
+				this.session
+					.getAsyncJobSnapshot()
+					?.running.filter(
+						job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
+					).length ?? 0;
 			if (runningBackgroundJobs > 0) {
 				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
 			}
@@ -2114,6 +2200,11 @@ export class StatusLineComponent implements Component {
 		// so the width budget excludes them too.
 		const leftCapWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.right) : 0;
 		const rightCapWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.left) : 0;
+		// The band layout opens flush against the terminal edge with a soft cap
+		// (rust omp's status band). Like the other caps it needs an opaque
+		// background to bridge, and only powerline separator styles carry caps.
+		const bandCap = layout === "band" && separatorDef.endCaps && !transparentBg ? theme.sep.powerlineCapLeft : "";
+		const bandCapWidth = visibleWidth(bandCap);
 
 		const groupWidth = (parts: string[], capWidth: number, sepWidth: number): number => {
 			if (parts.length === 0) return 0;
@@ -2122,9 +2213,26 @@ export class StatusLineComponent implements Component {
 			return partsWidth + sepTotal + 2 + capWidth;
 		};
 
-		let leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
+		let leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
 		let rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
-		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
+		// Embedded mode removes the standalone context segment before overflow
+		// handling, so the gauge must reserve enough room for both labels. Without
+		// this budget a long path/session title can leave a one-cell gap: the
+		// context segment is gone, and the gauge silently omits its labels too.
+		const embeddedContextWidth = embedContext
+			? embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow)
+			: 0;
+		const minimumGapWidth = (): number => {
+			if (!embeddedContextWidth) return left.length > 0 && right.length > 0 ? 1 : 0;
+			// If the labels cannot coexist with the last surviving segment, fall
+			// back to the original one-cell gauge instead of dropping the entire
+			// status line. At this width the labels cannot render either way.
+			if (left.length + right.length === 1 && leftWidth + rightWidth + embeddedContextWidth > topFillWidth) {
+				return 1;
+			}
+			return embeddedContextWidth;
+		};
+		const totalWidth = () => leftWidth + rightWidth + minimumGapWidth();
 
 		if (topFillWidth > 0) {
 			// Truncate the session-name segment before dropping right segments —
@@ -2176,7 +2284,7 @@ export class StatusLineComponent implements Component {
 							reRendered = adjusted;
 						}
 						left[pathIdx] = reRendered.content;
-						leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
+						leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
 					}
 				}
 			}
@@ -2203,7 +2311,7 @@ export class StatusLineComponent implements Component {
 				if (hasLowPriorityRight) break;
 				left.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
-				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
+				leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
 			}
 
 			// Drop low-priority right segments (time, session_name, token_rate) before touching cost/context
@@ -2243,15 +2351,17 @@ export class StatusLineComponent implements Component {
 					: "";
 			const capPrefix = separatorDef.endCaps?.useBgAsFg ? bgAnsi.replace("\x1b[48;", "\x1b[38;") : bgAnsi + sepAnsi;
 			const capText = cap ? `${capPrefix}${this.#focusedAgentId ? "\x1b[22m" : ""}${cap}\x1b[0m` : "";
+			const openText =
+				direction === "left" && bandCap
+					? `${capPrefix}${this.#focusedAgentId ? "\x1b[22m" : ""}${bandCap}\x1b[0m`
+					: "";
 
 			let content = bgAnsi + fgAnsi;
 			content += ` ${parts.join(` ${sepAnsi}${sep}${fgAnsi} `)} `;
 			content += "\x1b[0m";
 
-			if (capText) {
-				return direction === "right" ? capText + content : content + capText;
-			}
-			return content;
+			if (direction === "right") return capText + content;
+			return openText + content + capText;
 		};
 
 		const leftGroup = renderGroup(left, "left");
@@ -2292,9 +2402,7 @@ export class StatusLineComponent implements Component {
 	): string {
 		const sessionName =
 			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
-		const accentHex = sessionName
-			? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
-			: undefined;
+		const accentHex = sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : undefined;
 		const usedColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("borderAccent");
 		const horizontal = theme.boxRound.horizontal;
 		const mode = effectiveSettings.contextLine ?? "embedded";
@@ -2316,7 +2424,7 @@ export class StatusLineComponent implements Component {
 		if (embedContext) {
 			const candidatePercent = formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
 			const candidateWindow = formatNumber(ctx.contextWindow);
-			if (gapWidth >= candidatePercent.length + candidateWindow.length + 4) {
+			if (gapWidth >= embeddedContextGaugeMinWidth(percentOverflow ? pct : clampedPct, ctx.contextWindow)) {
 				percentLabel = candidatePercent;
 				windowLabel = candidateWindow;
 				if (percentOverflow) {
@@ -2454,9 +2562,7 @@ export class StatusLineComponent implements Component {
 		if (gapWidth > 0) {
 			const sessionName =
 				effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
-			const accentHex = sessionName
-				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
-				: undefined;
+			const accentHex = sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : undefined;
 			const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
 			content += `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
 		}
@@ -2701,9 +2807,7 @@ export class StatusLineComponent implements Component {
 					const gapWidth = Math.max(1, width - leftWidthG - rightWidthG);
 					const sessionName =
 						effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
-					const accentHex = sessionName
-						? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
-						: undefined;
+					const accentHex = sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : undefined;
 					const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
 					const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
 					let groupedContent = leftGroup + gapFill + rightGroup;
@@ -2764,17 +2868,29 @@ export class StatusLineComponent implements Component {
 	}
 
 	getTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {
-		let content = this.#buildStatusLine(width, "box", previewTitle);
-		if (this.#focusedAgentId && content) {
-			// Dim the whole bar while focus-proxied. Group/cap terminators emit full
-			// `\x1b[0m` resets that would cancel faint mid-bar, so re-open it after each.
-			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
-		}
+		const content = this.#dimWhileFocusProxied(this.#buildStatusLine(width, "box", previewTitle));
 		return {
 			content,
 			width: visibleWidth(content),
 			revision: this.#renderRevision,
 		};
+	}
+
+	/** Flush-left soft-capped powerline band (the band composer's top row). */
+	getBandTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {
+		const content = this.#dimWhileFocusProxied(this.#buildStatusLine(width, "band", previewTitle));
+		return {
+			content,
+			width: visibleWidth(content),
+			revision: this.#renderRevision,
+		};
+	}
+
+	/** Dim the whole bar while focus-proxied. Group/cap terminators emit full
+	 * `\x1b[0m` resets that would cancel faint mid-bar, so re-open it after each. */
+	#dimWhileFocusProxied(content: string): string {
+		if (!this.#focusedAgentId || !content) return content;
+		return `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
 	}
 	/**
 	 * Standalone bar placement derived from the composer style. `bottomBar`
@@ -2785,8 +2901,9 @@ export class StatusLineComponent implements Component {
 	 * `bottomBarGap` inserts a blank spacer row above the bar for styles whose
 	 * editor has no bottom chrome.
 	 */
-	setComposerStyle(style: Pick<ComposerStyle, "bottomBar" | "bottomBarGap">): void {
+	setComposerStyle(style: Pick<ComposerStyle, "statusAttachment" | "bottomBar" | "bottomBarGap">): void {
 		this.#standalone = style.bottomBar === "none" ? false : style.bottomBar === "left" ? "left-only" : "full";
+		this.#topAttachment = style.statusAttachment;
 		this.#standaloneGap = style.bottomBarGap;
 	}
 
@@ -2797,10 +2914,7 @@ export class StatusLineComponent implements Component {
 
 	/** Plain right-group content for the claude composer's top rule. */
 	getStandaloneTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {
-		let content = this.#buildStatusLine(width, "plain-right", previewTitle);
-		if (this.#focusedAgentId && content) {
-			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
-		}
+		const content = this.#dimWhileFocusProxied(this.#buildStatusLine(width, "plain-right", previewTitle));
 		return {
 			content,
 			width: visibleWidth(content),
@@ -2815,11 +2929,9 @@ export class StatusLineComponent implements Component {
 	 * the active one).
 	 */
 	renderBottomBar(width: number, groups: "left" | "full", previewTitle?: string): string {
-		let content = this.#buildStatusLine(width, groups === "left" ? "plain-left" : "plain-full", previewTitle);
-		if (this.#focusedAgentId && content) {
-			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
-		}
-		return content;
+		return this.#dimWhileFocusProxied(
+			this.#buildStatusLine(width, groups === "left" ? "plain-left" : "plain-full", previewTitle),
+		);
 	}
 	/**
 	 * Status bar lines for a composer layout, rendered through the real
@@ -2829,9 +2941,7 @@ export class StatusLineComponent implements Component {
 	 * render.
 	 */
 	getPreviewLines(width: number, style?: Pick<ComposerStyle, "statusAttachment" | "bottomBar">): string[] {
-		const attachment =
-			style?.statusAttachment ??
-			(this.#standalone === false ? "top-border" : this.#standalone === "left-only" ? "top-rule-chip" : "none");
+		const attachment = style?.statusAttachment ?? this.#topAttachment;
 		const bottomBar =
 			style?.bottomBar ?? (this.#standalone === false ? "none" : this.#standalone === "left-only" ? "left" : "full");
 		const lines: string[] = [];
@@ -2839,6 +2949,9 @@ export class StatusLineComponent implements Component {
 			for (const row of this.getTopBorderRows(width)) {
 				if (row.content) lines.push(row.content);
 			}
+		} else if (attachment === "top-band") {
+			const band = this.getBandTopBorder(width);
+			if (band.content) lines.push(band.content);
 		} else if (attachment === "top-rule-chip") {
 			// Render the chip on its rule exactly as the claude composer does.
 			const rule = claudeComposerStyle.renderTop({
@@ -2846,7 +2959,7 @@ export class StatusLineComponent implements Component {
 				paddingX: 0,
 				borderColor: str => theme.fg("border", str),
 				accentColor: str => theme.fg("accent", str),
-				surfaceColor: str => theme.bgFill("userMessageBg", str),
+				surfaceColor: str => theme.bgFill("userMessageBg", theme.fgOnBg("userMessageText", "userMessageBg", str)),
 				box: theme.boxRound,
 				topBorder: this.getStandaloneTopBorder(width),
 			});

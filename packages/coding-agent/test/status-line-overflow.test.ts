@@ -79,6 +79,7 @@ function createCtx(overrides?: {
 		speculationBlinkOn: true,
 		subagentCount: 0,
 		activeMs: 0,
+		turnElapsedMs: null,
 		activeRepo: null,
 		worktree: null,
 		git: {
@@ -149,9 +150,7 @@ describe("status line session accent", () => {
 
 	// Computed lazily: `theme` is assigned by initTheme() in beforeAll, after module evaluation.
 	const accentAnsi = (): string => {
-		const ansi = getSessionAccentAnsi(
-			getSessionAccentHex("Named session", theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance),
-		);
+		const ansi = getSessionAccentAnsi(getSessionAccentHex("Named session", theme.sessionAccentInputs));
 		if (!ansi) throw new Error("expected a session accent ANSI sequence for the test theme");
 		return ansi;
 	};
@@ -478,7 +477,8 @@ describe("default status line three-row contract", () => {
 			const rows = component.getTopBorderRows(72).map(row => stripAnsi(row.content));
 
 			expect(rows).toHaveLength(3);
-			expect(rows[0]).toContain("OMP");
+			// Upstream v18.1.3 replaced the literal "OMP" brand text with the π icon.
+			expect(rows[0]).toContain(theme.icon.omp);
 			expect(rows[0]).toContain("Opus 5");
 			expect(rows[1]).toContain("0/128K");
 			expect(rows[2]).toContain("omp-three-row-dir-");

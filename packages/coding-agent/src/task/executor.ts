@@ -61,7 +61,7 @@ import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
-import type { EventBus } from "../utils/event-bus";
+import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
@@ -482,6 +482,7 @@ export interface ExecutorOptions {
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
 	eventBus?: EventBus;
+	subagentEventBus?: EventBus;
 	contextFiles?: ContextFileEntry[];
 	skills?: Skill[];
 	promptTemplates?: PromptTemplate[];
@@ -1006,6 +1007,7 @@ interface RunMonitorArgs {
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	eventBus?: EventBus;
+	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	detached?: boolean;
 	sessionFile?: string;
@@ -1356,19 +1358,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
 		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
-		if (args.eventBus) {
-			args.eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
-				index,
-				agent: agent.name,
-				agentSource: agent.source,
-				task,
-				parentToolCallId: args.parentToolCallId,
-				detached: args.detached,
-				assignment,
-				progress: { ...progress },
-				sessionFile: args.sessionFile,
-			});
-		}
+		const progressPayload = {
+			index,
+			agent: agent.name,
+			agentSource: agent.source,
+			task,
+			parentToolCallId: args.parentToolCallId,
+			detached: args.detached,
+			assignment,
+			progress: { ...progress },
+			sessionFile: args.sessionFile,
+		};
+		emitSubagentFrame(args.eventBus, args.subagentEventBus, TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload);
 		// machine-owned ledger: append only on material changes (selected/actual/fallback/reroute/terminal)
 		if (args.sessionFile) {
 			const snapshot = { ...progress } as typeof progress;
@@ -1486,11 +1487,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const emitSubagentEvent = (event: AgentSessionEvent) => {
-		if (!args.eventBus) return;
-		args.eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
-			id,
-			event,
-		});
+		const payload = { id, event };
+		emitSubagentFrame(args.eventBus, args.subagentEventBus, TASK_SUBAGENT_EVENT_CHANNEL, payload);
 	};
 
 	const recordExtractedToolData = (toolName: string, data: unknown): void => {
@@ -2243,6 +2241,7 @@ interface FinalizeRunArgs {
 	signal?: AbortSignal;
 	artifactsDir?: string;
 	eventBus?: EventBus;
+	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	detached?: boolean;
 	/**
@@ -2367,19 +2366,18 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	monitor.scheduleProgress(true);
 
 	// Emit lifecycle end event after finalization so yield status is reflected
-	if (args.eventBus) {
-		args.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id,
-			agent: agent.name,
-			parentToolCallId: args.parentToolCallId,
-			detached: args.detached,
-			agentSource: agent.source,
-			description: progress.description,
-			status: progress.status as "completed" | "failed" | "aborted",
-			sessionFile: args.sessionFile,
-			index,
-		});
-	}
+	const settledPayload = {
+		id,
+		agent: agent.name,
+		parentToolCallId: args.parentToolCallId,
+		detached: args.detached,
+		agentSource: agent.source,
+		description: progress.description,
+		status: progress.status as "completed" | "failed" | "aborted",
+		sessionFile: args.sessionFile,
+		index,
+	};
+	emitSubagentFrame(args.eventBus, args.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, settledPayload);
 
 	return {
 		index,
@@ -2437,6 +2435,7 @@ export interface IrcWakeTurnMonitorOptions {
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
 	eventBus?: EventBus;
+	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
@@ -2482,6 +2481,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			modelOverride: options.modelOverride,
 			modelRole: options.modelRole,
 			eventBus: options.eventBus,
+			subagentEventBus: options.subagentEventBus,
 			parentToolCallId: options.parentToolCallId,
 			detached: true,
 			sessionFile,
@@ -2490,19 +2490,18 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			maxRuntimeMs,
 		});
 
-		if (options.eventBus) {
-			options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-				id,
-				agent: agent.name,
-				parentToolCallId: options.parentToolCallId,
-				detached: true,
-				agentSource: agent.source,
-				description: options.description,
-				status: "started",
-				sessionFile,
-				index,
-			});
-		}
+		const startedPayload = {
+			id,
+			agent: agent.name,
+			parentToolCallId: options.parentToolCallId,
+			detached: true,
+			agentSource: agent.source,
+			description: options.description,
+			status: "started",
+			sessionFile,
+			index,
+		} as const;
+		emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
@@ -2544,6 +2543,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					outputSchemaSource: options.outputSchemaSource,
 					artifactsDir: options.artifactsDir,
 					eventBus: options.eventBus,
+					subagentEventBus: options.subagentEventBus,
 					parentToolCallId: options.parentToolCallId,
 					detached: true,
 					followUpTurn: true,
@@ -2702,6 +2702,7 @@ export interface FollowUpTurnOptions {
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	eventBus?: EventBus;
+	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	/**
 	 * When set, a turn that produces a `yield` result (re)writes `<artifactsDir>/<id>.md`
@@ -2742,6 +2743,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		signal,
 		onProgress: options.onProgress,
 		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
 		detached: true,
 		sessionFile,
@@ -2750,19 +2752,18 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 	});
 
-	if (options.eventBus) {
-		options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id,
-			agent: agent.name,
-			parentToolCallId: options.parentToolCallId,
-			detached: true,
-			agentSource: agent.source,
-			description: options.description,
-			status: "started",
-			sessionFile,
-			index,
-		});
-	}
+	const startedPayload = {
+		id,
+		agent: agent.name,
+		parentToolCallId: options.parentToolCallId,
+		detached: true,
+		agentSource: agent.source,
+		description: options.description,
+		status: "started",
+		sessionFile,
+		index,
+	} as const;
+	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
 	monitor.setActiveSession(session);
 	const unsubscribe = monitor.attach(session);
@@ -2795,6 +2796,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		signal,
 		artifactsDir: options.artifactsDir,
 		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
 		detached: true,
 		followUpTurn: true,
@@ -2956,6 +2958,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,
@@ -2983,6 +2986,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			modelOverride,
 			modelRole,
 			eventBus: options.eventBus,
+			subagentEventBus: options.subagentEventBus,
 			parentToolCallId: options.parentToolCallId,
 			sessionFile: subtaskSessionFile,
 			maxRuntimeMs,
@@ -3309,6 +3313,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				prewalk,
 				spawns: spawnsEnv,
 				taskDepth: childDepth,
+				// The whole spawn tree shares the root session's observability bus,
+				// so nested lifecycle/progress/event frames reach its surfaces
+				// without leaking into another root session's traffic.
+				subagentEventBus: options.subagentEventBus,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 				parentTaskPrefix: id,
@@ -3403,19 +3411,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			// Emit lifecycle start event
-			if (options.eventBus) {
-				options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-					id,
-					agent: agent.name,
-					parentToolCallId: options.parentToolCallId,
-					detached: options.detached,
-					agentSource: agent.source,
-					description: options.description,
-					status: "started",
-					sessionFile: subtaskSessionFile,
-					index,
-				});
-			}
+			const startedPayload = {
+				id,
+				agent: agent.name,
+				parentToolCallId: options.parentToolCallId,
+				detached: options.detached,
+				agentSource: agent.source,
+				description: options.description,
+				status: "started" as const,
+				sessionFile: subtaskSessionFile,
+				index,
+			};
+			emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
 			// Todos are parent-owned bookkeeping and stripped from subagents —
 			// except under prewalk, whose plan nudge + todo gate require the
@@ -3729,6 +3736,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		artifactsDir: options.artifactsDir,
 		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,

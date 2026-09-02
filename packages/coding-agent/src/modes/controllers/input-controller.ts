@@ -442,12 +442,13 @@ export class InputController {
 				// Esc must not destroy an in-progress draft.
 				this.ctx.lastEscapeTime = 0;
 			} else {
-				// Double-interrupt with empty editor triggers /tree, /branch, or nothing based on setting
-				const action = settings.get("doubleEscapeAction");
-				if (action !== "none") {
+				// Double-interrupt with an empty editor runs the configured action:
+				// the transcript rewind selector (default) or the session tree.
+				const doubleEscapeAction = settings.get("doubleEscapeAction");
+				if (doubleEscapeAction !== "none") {
 					const now = Date.now();
 					if (now - this.ctx.lastEscapeTime < 500) {
-						if (action === "tree") {
+						if (doubleEscapeAction === "tree") {
 							this.ctx.showTreeSelector();
 						} else {
 							this.ctx.showUserMessageSelector();
@@ -2051,6 +2052,7 @@ export class InputController {
 			return;
 		}
 		this.setToolsExpanded(!this.ctx.toolOutputExpanded);
+		this.ctx.showStatus(`Tool output expansion: ${this.ctx.toolOutputExpanded ? "enabled" : "disabled"}`);
 	}
 
 	toggleToolActivityVisibility(): void {
@@ -2118,6 +2120,11 @@ export class InputController {
 
 		// This is an explicit user display gesture: rebuild native history so the
 		// visibility change also applies to rows already retired from the viewport.
+		// Append-only thinking heads emitted their stable rows to scrollback while
+		// streaming (visible); forget that emission ledger so the paired scrollback
+		// clear re-renders them under the new visibility instead of replaying the
+		// captured reasoning (#10177).
+		this.ctx.chatContainer.resetStableEmission();
 		this.ctx.ui.resetDisplay();
 
 		this.ctx.showStatus(`Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`);
@@ -2157,7 +2164,7 @@ export class InputController {
 			this.ctx.editor.setCustomKeyHandler(keyId, () => {
 				const ctx = runner.createCommandContext();
 				try {
-					shortcut.handler(ctx);
+					runner.runScoped(() => shortcut.handler(ctx));
 				} catch (err) {
 					runner.emitError({
 						extensionPath: shortcut.extensionPath,

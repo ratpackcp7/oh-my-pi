@@ -8,6 +8,85 @@
 
 - Added provider-authoritative Meta Model API per-minute headroom to usage reports and routing when response headers are available.
 - Added broker `POST /v1/usage/limit-report` so header-derived Meta usage limits persist through the canonical auth broker for cross-process readers.
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed Gemini 3 sessions on Antigravity/Cloud Code Assist and Vertex AI getting permanently stuck on `400 INVALID_ARGUMENT` after a turn with parallel tool calls ([#9638](https://github.com/can1357/oh-my-pi/issues/9638)).
+- Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.
+- Fixed Anthropic-compatible endpoints backed by Amazon Bedrock permanently rejecting a session once an unsigned thinking block entered its history. The transport now recognizes Bedrock's `ValidationException … thinking.signature: Field required` as the same unsigned-thinking rejection it already heals for other signing proxies, so it demotes the unsigned block to text, retries once, and remembers the endpoint for the rest of the session instead of failing every turn and walking the model fallback chain.
+- Fixed the DeepSeek DSML markup healer leaking orphan `</｜DSML｜parameter>`/`</｜DSML｜invoke>` close tags into visible text, which poisoned long-session history and reinforced the model's XML-protocol mimicry until tool calls stopped dispatching ([#10556](https://github.com/can1357/oh-my-pi/issues/10556)).
+- Fixed repeated parallel tool-call batches bypassing the configured loop guard.
+- Fixed Cursor tool-schema composition failures by projecting unsupported keywords only for confirmed Fable models; Grok and other Cursor models retain canonical schemas.
+- Fixed API-key account rotation to honor provider-reported quota reset windows, including overlapping exhausted windows ([#10325](https://github.com/can1357/oh-my-pi/pull/10325) by [@usr-bin-roygbiv](https://github.com/usr-bin-roygbiv)).
+
+## [18.1.2] - 2026-09-01
+
+### Added
+
+- Added thinking controls for Amazon Bedrock models.
+- Added dynamic mid-conversation updates for Anthropic system prompts, tools, and reasoning effort.
+- Added deferred tool loading and prompt caching for Anthropic models.
+- Added configurable handling for invalid Anthropic thinking blocks through `anthropicPrefixMismatchBehavior`.
+
+### Fixed
+
+- Fixed compatibility issues with Anthropic thinking and prompt-cache breakpoints across deployments, preserving valid reasoning context while preventing invalid-signature errors.
+- Fixed incorrect operating-system information reported in request headers on non-Linux systems.
+- Fixed Google Antigravity quota handling so requests rotate to another account with available usage instead of unnecessarily switching models.
+- Fixed Anthropic authentication for newer models by updating the Claude Code request fingerprint.
+
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added an optional `completeSimple` callback that observes every result, including results from internal thinking-loop retries.
+- Added compatibility options for Anthropic-compatible proxies that reject `context_management` and OpenAI Responses proxies that provide incomplete reasoning-summary streams.
+- Added ClinePass API-key authentication via the official `CLINE_API_KEY` environment variable, with account validation, actionable subscription and quota errors, support for eligible ClinePass model rosters, and rolling quota-window reporting in `omp usage`.
+- Added Devin router-model support, including assignment of the concrete model before each request, routed-model metadata, credit usage reporting, and plan, quota-window, and account details through `omp usage`.
+
+### Changed
+
+- Provider behavior is now driven by each model's resolved compatibility, identity, thinking, and behavior policies rather than model-name matching, improving support for model-specific request formatting, vision, reasoning, routing, pricing, and quota handling.
+- Devin integrations now use the current released CLI identity and support parallel tool calls when the model declares that capability.
+
+### Fixed
+
+- Fixed OpenAI remote-compaction replay for persisted sessions, allowing sessions with previously stored compaction items to resume successfully.
+- Fixed Cursor Fable requests failing when advertised tools used JSON Schema composition keywords.
+- Fixed Z.AI (GLM Coding Plan) browser sign-in by using the registered CLI callback address.
+- Fixed OpenAI Codex/Responses tool results being lost when composite call identifiers could not be paired with the corresponding assistant call.
+- Fixed native OpenAI Responses history replay becoming stuck on malformed or truncated function-call arguments; invalid history items are now discarded so the session can recover.
+
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed automatic session retries for Anthropic-compatible streams that end prematurely without a completion signal.
+- Fixed Gemini 3.x tool-call continuations through OpenAI-compatible endpoints.
+- Fixed credential fallback for HTTP 402 payment-required and deactivated-workspace responses, preventing them from being misclassified as quota exhaustion.
+- Fixed Perplexity email sign-in for accounts protected by authenticator-based two-factor authentication.
+- Fixed Qianfan API-key login validation for keys that cannot access the validation model.
+- Fixed Z.AI browser sign-in to report an occupied callback port before opening the browser.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
+- Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
+- Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
+
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- Added Z.AI GLM Coding Plan usage tracking: credit-based `CREDIT_LIMIT` windows (5h + weekly) now surface in `omp usage` and the status line with the plan tier (`plan: lite/pro/max`).
+
+### Fixed
+
+- Fixed Amazon Bedrock requests to OpenAI-schema models (the `gpt-5.x` SKUs) failing with HTTP 400 `unknown_parameter: 'thinking'` when reasoning was enabled, by sending `reasoning.effort` instead of Anthropic's `thinking` budget block for models the catalog marks as effort-controlled.
+- Fixed Cursor replay rejecting sessions with orphaned tool results while preserving their output as assistant context.
 
 ## [18.0.7] - 2026-08-26
 
@@ -1992,7 +2071,7 @@
 - Fixed Anthropic-compatible proxies that omit `usage`/`delta` objects from `message_start`/`message_delta`/`content_block_*` envelopes crashing the turn with an unretryable `TypeError`; the missing payloads now degrade to logged envelope anomalies like every other malformed-frame case.
 - Fixed `applyPromptCaching` placing `cache_control` on `thinking`/`redacted_thinking` blocks — Anthropic rejects that with a 400. A thinking-only assistant turn inside the trailing cache window (e.g. followed by the synthetic `Continue.` pad) no longer receives a breakpoint.
 - Fixed consecutive `assistant` params reaching the wire when an empty user/developer turn between two assistant turns was dropped by the converter (e.g. an empty "nudge" submission after a length-truncated reply); Anthropic 400s on non-alternating assistant turns, and the broken triple replayed on every subsequent request. A `user: "Continue."` separator is now inserted, mirroring the trailing-prefill fallback.
-- Fixed `supportsAdaptiveThinkingDisplay` misparsing bare dated Opus ids: `claude-opus-4-20250514` (Opus 4.0) parsed as minor `20250514` ≥ 4.7, which silently dropped the `interleaved-thinking-2025-05-14` beta for API-key Opus 4.0 requests.
+- Fixed adaptive-display classification misparsing bare dated Opus ids: `claude-opus-4-20250514` (Opus 4.0) parsed as minor `20250514` ≥ 4.7, which silently dropped the `interleaved-thinking-2025-05-14` beta for API-key Opus 4.0 requests.
 - Fixed `output_config.effort` shipping without the `effort-2025-11-24` beta on thinking-off requests against adaptive-only Claude models (the effort:"low" pin), and the mid-conversation `system` role shipping without `mid-conversation-system-2026-04-07` on API-key and OAuth-utility requests; both betas are now added whenever the request can carry the corresponding field.
 - Fixed GitHub Copilot anthropic-messages requests going out with no `Content-Type` and no `anthropic-version` header — the copilot branch builds its headers from scratch and Bun's fetch does not default `Content-Type` for string bodies. Both headers are now pinned to match every other branch.
 - Fixed Anthropic client/provider retry multiplication: with the first-event watchdog disabled (`PI_STREAM_FIRST_EVENT_TIMEOUT_MS=0`), the client's internal `maxRetries: 5` reactivated and stacked with the provider loop's 3 retries — up to 24 wire attempts with double backoff. The provider now pins per-request `maxRetries: 0` unconditionally.

@@ -3,14 +3,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
-import { formatDuration, renderAsciiBar } from "./format";
-
-function formatProviderName(provider: string): string {
-	return provider
-		.split(/[-_]/g)
-		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
-		.join(" ");
-}
+import { formatDuration, formatProviderName, renderAsciiBar } from "./format";
 
 function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
 	if (!windowLabel) return "";
@@ -165,10 +158,8 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 						runtime.session.sessionId,
 					)
 				: undefined;
-			return renderUsageReports(
-				reports,
-				Date.now(),
-				providerId => (providerId === currentProvider ? activeAccount : undefined),
+			return renderUsageReports(reports, Date.now(), providerId =>
+				providerId === currentProvider ? activeAccount : undefined,
 			);
 		}
 	}
