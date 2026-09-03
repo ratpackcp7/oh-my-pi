@@ -1,6 +1,10 @@
 // Provider-wire compat for "meta"; regenerated from the frozen census using deployment contract selectors.
 
 provider "meta" {
+	// Meta accepts only the no-op `tool_choice: "auto"` value. Treat the
+	// control as unsupported so callers omit forced/none selectors while
+	// preserving the offered tool catalogue.
+	supports-tool-choice #false
 	include-encrypted-reasoning #true
 	supports-reasoning-effort #true
 	class "unknown" {
