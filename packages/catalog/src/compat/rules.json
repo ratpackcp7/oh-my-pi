@@ -9091,7 +9091,7 @@
 				}
 			},
 			{
-				"source": "providers/meta.kdl:6",
+				"source": "providers/meta.kdl:10",
 				"class": "unknown",
 				"providers": [
 					"meta"
@@ -9113,6 +9113,7 @@
 					"meta"
 				],
 				"wire": {
+					"supportsToolChoice": false,
 					"includeEncryptedReasoning": true,
 					"supportsReasoningEffort": true
 				}

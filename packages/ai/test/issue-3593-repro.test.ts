@@ -197,4 +197,20 @@ describe("issue #6925 — LM Studio Responses string-only tool_choice", () => {
 		expect(payload.tools?.map(tool => tool.name)).toEqual(["todo", "resolve"]);
 		expect(payload.tool_choice).toEqual({ type: "function", name: "todo" });
 	});
+
+	it("omits unsupported Meta tool_choice controls while preserving the tool catalogue", async () => {
+		const target = responsesModel({
+			provider: "meta",
+			baseUrl: "https://api.meta.ai/v1",
+			id: "muse-spark-1.3-contributor",
+			name: "Muse Spark 1.3 Contributor",
+		});
+		const forced = await captureResponsesPayload(target, multiToolContext, { type: "tool", name: "todo" });
+		const disabled = await captureResponsesPayload(target, multiToolContext, "none");
+
+		expect(forced.tools?.map(tool => tool.name)).toEqual(["todo", "resolve"]);
+		expect(forced.tool_choice).toBeUndefined();
+		expect(disabled.tools?.map(tool => tool.name)).toEqual(["todo", "resolve"]);
+		expect(disabled.tool_choice).toBeUndefined();
+	});
 });

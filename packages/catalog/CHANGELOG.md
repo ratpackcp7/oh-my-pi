@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Meta Responses models now omit unsupported `tool_choice` controls, preventing 400s when OMP callers request forced or disabled tool selection while keeping the tool catalogue available.
+
 ## [18.1.3] - 2026-09-02
 
 ### Added
