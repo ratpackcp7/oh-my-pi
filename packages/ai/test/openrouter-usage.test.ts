@@ -1,13 +1,32 @@
-import { describe, expect, test } from "bun:test";
-import { openrouterUsageProvider } from "../src/usage/openrouter";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { openrouterUsageProvider, setManagementKeyDiscovererForTests } from "../src/usage/openrouter";
 
 const credential = { type: "api_key" as const, apiKey: "sk-or-test-secret" };
+const MGMT = "sk-or-mgmt-test";
 
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+function analyticsRow(totalUsage: number, requests = 0, tokens = 0): unknown {
+	return { data: { data: [{ total_usage: totalUsage, request_count: requests, tokens_total: tokens }] } };
+}
+
+const priorEnv = { ...process.env };
+
 describe("OpenRouter authoritative spend", () => {
+	beforeEach(() => {
+		delete process.env.OPENROUTER_MGMT_KEY;
+		delete process.env.OPENROUTER_MANAGEMENT_KEY;
+		setManagementKeyDiscovererForTests(() => null);
+	});
+
+	afterEach(() => {
+		process.env.OPENROUTER_MGMT_KEY = priorEnv.OPENROUTER_MGMT_KEY;
+		process.env.OPENROUTER_MANAGEMENT_KEY = priorEnv.OPENROUTER_MANAGEMENT_KEY;
+		setManagementKeyDiscovererForTests(() => null);
+	});
+
 	test("parses inference-key daily/weekly/monthly spend without pretending it is account-wide", async () => {
 		const requests: string[] = [];
 		const fetch = async (input: string | URL | Request) => {
@@ -41,14 +60,20 @@ describe("OpenRouter authoritative spend", () => {
 		expect(report?.metadata?.credentialRole).toBe("inference");
 	});
 
-	test("management key reports account credits/balance separately from inference-key spend", async () => {
+	test("discovered management key upgrades inference-key report to account-wide analytics", async () => {
+		setManagementKeyDiscovererForTests(() => MGMT);
 		const requests: string[] = [];
 		const fetch = async (input: string | URL | Request) => {
 			const url = String(input);
 			requests.push(url);
-			if (url.endsWith("/api/v1/key")) return jsonResponse({ data: { is_management_key: true } });
+			if (url.endsWith("/api/v1/key")) {
+				return jsonResponse({ data: { usage_weekly: 2.91, is_management_key: false } });
+			}
+			if (url.endsWith("/api/v1/analytics/query")) {
+				return jsonResponse(analyticsRow(1.58, 4303, 273_451_203));
+			}
 			if (url.endsWith("/api/v1/credits")) {
-				return jsonResponse({ data: { total_credits: 20, total_usage: 7.25 } });
+				return jsonResponse({ data: { total_credits: 65, total_usage: 58.63 } });
 			}
 			throw new Error(`unexpected ${url}`);
 		};
@@ -58,15 +83,71 @@ describe("OpenRouter authoritative spend", () => {
 			{ fetch: fetch as unknown as typeof globalThis.fetch },
 		);
 
-		expect(requests).toEqual(["https://openrouter.ai/api/v1/key", "https://openrouter.ai/api/v1/credits"]);
-		expect(report?.actualSpend?.status).toBe("available");
-		expect(report?.actualSpend?.windows).toEqual([
-			{ id: "total", label: "Account total usage", amountUsd: 7.25, scope: "account" },
+		expect(requests.some(url => url.endsWith("/api/v1/analytics/query"))).toBe(true);
+		const spend = report?.actualSpend;
+		expect(spend?.status).toBe("available");
+		expect(spend?.source).toBe("openrouter-analytics");
+		expect(spend?.windows).toEqual([
+			{ id: "1d", label: "1 day", amountUsd: 1.58, scope: "account" },
+			{ id: "7d", label: "7 days", amountUsd: 1.58, scope: "account" },
+			{ id: "monthly", label: "Monthly", amountUsd: 1.58, scope: "account" },
 		]);
-		expect(report?.actualSpend?.balanceUsd).toBe(12.75);
-		expect(report?.actualSpend?.balanceScope).toBe("account");
+		expect(spend?.balanceUsd).toBeCloseTo(6.37, 5);
+		expect(spend?.balanceScope).toBe("account");
+		expect(spend?.notes?.some(note => note.includes("not account-wide"))).toBe(true);
+		expect(spend?.notes?.some(note => note.includes("4.3k requests"))).toBe(true);
 		expect(report?.metadata?.scope).toBe("account");
+		expect(JSON.stringify(report)).not.toContain(MGMT);
+		expect(JSON.stringify(report)).not.toContain(credential.apiKey);
+	});
+
+	test("management-key credential reports analytics windows plus credits balance", async () => {
+		const mgmtCredential = { type: "api_key" as const, apiKey: MGMT };
+		const fetch = async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url.endsWith("/api/v1/key")) return jsonResponse({ data: { is_management_key: true } });
+			if (url.endsWith("/api/v1/analytics/query")) return jsonResponse(analyticsRow(7.02));
+			if (url.endsWith("/api/v1/credits")) {
+				return jsonResponse({ data: { total_credits: 20, total_usage: 7.25 } });
+			}
+			throw new Error(`unexpected ${url}`);
+		};
+
+		const report = await openrouterUsageProvider.fetchUsage(
+			{ provider: "openrouter", credential: mgmtCredential },
+			{ fetch: fetch as unknown as typeof globalThis.fetch },
+		);
+
+		const spend = report?.actualSpend;
+		expect(spend?.status).toBe("available");
+		expect(spend?.windows).toEqual([
+			{ id: "1d", label: "1 day", amountUsd: 7.02, scope: "account" },
+			{ id: "7d", label: "7 days", amountUsd: 7.02, scope: "account" },
+			{ id: "monthly", label: "Monthly", amountUsd: 7.02, scope: "account" },
+		]);
+		expect(spend?.balanceUsd).toBe(12.75);
 		expect(report?.metadata?.credentialRole).toBe("management");
+	});
+
+	test("analytics failure falls back to credential-scope spend without inventing account data", async () => {
+		setManagementKeyDiscovererForTests(() => MGMT);
+		const fetch = async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url.endsWith("/api/v1/key")) {
+				return jsonResponse({ data: { usage_weekly: 0.84, is_management_key: false } });
+			}
+			return jsonResponse({ error: "forbidden" }, 403);
+		};
+
+		const report = await openrouterUsageProvider.fetchUsage(
+			{ provider: "openrouter", credential },
+			{ fetch: fetch as unknown as typeof globalThis.fetch },
+		);
+
+		const spend = report?.actualSpend;
+		expect(spend?.windows?.every(window => window.scope === "credential")).toBe(true);
+		expect(spend?.windows?.find(window => window.id === "7d")?.amountUsd).toBe(0.84);
+		expect(spend?.balanceUsd).toBeUndefined();
 	});
 
 	test("classifies only official OpenRouter API-key credentials as supported", () => {
