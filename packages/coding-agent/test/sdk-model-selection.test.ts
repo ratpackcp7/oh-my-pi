@@ -184,6 +184,58 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("refreshes a known built-in provider when an explicit model exists only in its live catalog", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("meta", "meta-test-key");
+		let modelListCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "https://api.meta.ai/v1/models") {
+				modelListCalls += 1;
+				return Response.json({
+					data: [
+						{
+							id: "muse-spark-1.3-contributor",
+							name: "Muse Spark 1.3 Contributor",
+						},
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { fetch: fetchMock });
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			modelPattern: "meta/muse-spark-1.3-contributor",
+		});
+
+		try {
+			expect(modelListCalls).toBe(1);
+			expect(session.model?.provider).toBe("meta");
+			expect(session.model?.id).toBe("muse-spark-1.3-contributor");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("defers online runtime discovery until the UI starts it after first paint", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);

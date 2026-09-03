@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Explicit models that exist only in a built-in provider's live catalog now resolve on fresh startup instead of failing as missing before that provider's model discovery runs.
 - Switching from Vibe into a normal session now restores registered shell/read/edit/write/task tools instead of leaving only the leftover Vibe subset.
 - Heavy compiler, linter, build, and test launches now defer under severe Linux host memory pressure, and Cleanse limits checker fan-out, reducing the chance that disposable diagnostics trigger system-wide OOM kills.
 - Cheap / Sonic worker routing now stays inside the fast (`@smol`) class: a high-headroom premium model can no longer win a non-pinned cheap dispatch.

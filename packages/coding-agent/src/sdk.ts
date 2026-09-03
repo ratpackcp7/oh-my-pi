@@ -2320,26 +2320,69 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// window.
 			await logger.time("resolveModelDiscoveryDeferredRetry", startRuntimeDiscovery);
 			const matchPreferences = getModelMatchPreferences(settings);
-			const runtimeResolved = deferredModelPatterns.some(pattern =>
-				pattern.split(",").some(selector => {
-					const trimmedSelector = selector.trim();
-					if (!trimmedSelector) return false;
-					const resolved = resolveCliModel({
-						cliModel: trimmedSelector,
-						modelRegistry,
-						settings,
-						preferences: matchPreferences,
-					});
-					// Only a concretely resolved model counts as a runtime match. A role
-					// alias that expanded to `configuredPatterns` but resolved no model
-					// (its discoverable provider hasn't been fetched yet) must NOT
-					// short-circuit the fallback refresh below — otherwise `@role`
-					// selectors pointing at discovery-backed models never trigger the
-					// fetch and fail with `Model "@role" not found`.
-					return Boolean(resolved.model);
-				}),
-			);
-			if (!runtimeResolved && modelRegistry.getDiscoverableProviders().length > 0) {
+			const modelPatternResolves = (): boolean =>
+				deferredModelPatterns.some(pattern =>
+					pattern.split(",").some(selector => {
+						const trimmedSelector = selector.trim();
+						if (!trimmedSelector) return false;
+						const resolved = resolveCliModel({
+							cliModel: trimmedSelector,
+							modelRegistry,
+							settings,
+							preferences: matchPreferences,
+						});
+						// Only a concretely resolved model counts as a runtime match. A role
+						// alias that expanded to `configuredPatterns` but resolved no model
+						// (its provider hasn't been fetched yet) must NOT short-circuit the
+						// provider refresh below.
+						return Boolean(resolved.model);
+					}),
+				);
+			let discoveryResolved = modelPatternResolves();
+			if (!discoveryResolved) {
+				// A fresh OMP home has no models.db. Built-in catalog providers such
+				// as Meta can therefore expose only their static seed until their
+				// authenticated /models endpoint is refreshed. `startRuntimeDiscovery`
+				// covers extension providers, while `getDiscoverableProviders()` only
+				// covers models.yml discovery providers; neither reaches these built-in
+				// managers. Refresh only providers named by the deferred selector so an
+				// explicit `meta/muse-spark-1.3-contributor` can resolve without a
+				// full-catalog network sweep.
+				const providersToRefresh = new Set<string>();
+				for (const pattern of deferredModelPatterns) {
+					for (const selector of pattern.split(",")) {
+						const trimmedSelector = selector.trim();
+						if (!trimmedSelector) continue;
+						const resolved = resolveCliModel({
+							cliModel: trimmedSelector,
+							modelRegistry,
+							settings,
+							preferences: matchPreferences,
+						});
+						const concretePatterns =
+							resolved.configuredPatterns && resolved.configuredPatterns.length > 0
+								? resolved.configuredPatterns
+								: [trimmedSelector];
+						for (const concretePattern of concretePatterns) {
+							const parsed = parseModelString(concretePattern, {
+								allowMaxSuffix: true,
+								allowAutoAlias: true,
+								isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+							});
+							if (parsed && modelRegistry.hasProvider(parsed.provider)) {
+								providersToRefresh.add(parsed.provider);
+							}
+						}
+					}
+				}
+				for (const provider of providersToRefresh) {
+					await logger.time("resolveModelDiscoveryProviderRetry", () =>
+						modelRegistry.refreshProvider(provider, "online-if-uncached"),
+					);
+				}
+				if (providersToRefresh.size > 0) discoveryResolved = modelPatternResolves();
+			}
+			if (!discoveryResolved && modelRegistry.getDiscoverableProviders().length > 0) {
 				await logger.time("resolveModelDiscoveryFallbackNonRuntime", () =>
 					modelRegistry.refresh("online-if-uncached"),
 				);
