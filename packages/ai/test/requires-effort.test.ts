@@ -1,9 +1,21 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
+import { __openRouterAllowlistForTesting } from "@oh-my-pi/pi-ai/openrouter-allowlist";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec, ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
+
+beforeAll(() => {
+	__openRouterAllowlistForTesting.setApprovedSelectors([
+		"openrouter/test/router-model",
+		"openrouter/test/router-model-thinking",
+	]);
+});
+
+afterAll(() => {
+	__openRouterAllowlistForTesting.reset();
+});
 
 interface CapturedBody {
 	model?: string;

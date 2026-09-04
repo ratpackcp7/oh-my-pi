@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { __openRouterAllowlistForTesting } from "@oh-my-pi/pi-ai/openrouter-allowlist";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
@@ -13,6 +14,22 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+
+beforeAll(() => {
+	__openRouterAllowlistForTesting.setApprovedSelectors([
+		"openrouter/anthropic/claude-haiku-latest",
+		"openrouter/anthropic/claude-haiku-latest:online",
+		"openrouter/anthropic/claude-fable-5",
+		"openrouter/deepseek/deepseek-r1",
+		"openrouter/moonshotai/kimi-k2.6",
+		"openrouter/anthropic/claude-sonnet-4",
+		"openrouter/deepseek/deepseek-chat",
+	]);
+});
+
+afterAll(() => {
+	__openRouterAllowlistForTesting.reset();
+});
 
 const context: Context = {
 	systemPrompt: ["Stay concise."],

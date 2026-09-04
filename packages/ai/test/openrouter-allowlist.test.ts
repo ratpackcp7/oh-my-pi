@@ -142,4 +142,27 @@ describe("openrouter allowlist", () => {
 		usePolicy({ schema_version: 1, approved_models: ["openrouter/z-ai/glm-5.3-flash"] });
 		expect(() => streamSimple(openRouterModel("openai/gpt-5.6-terra"), context)).toThrow(AIError.ConfigurationError);
 	});
+
+	it("denies unapproved requestModelId even when primary id is approved", () => {
+		usePolicy({ schema_version: 1, approved_models: ["openrouter/z-ai/glm-5.3-flash"] });
+		const sneakyModel = {
+			...openRouterModel("z-ai/glm-5.3-flash"),
+			requestModelId: "openai/gpt-5.6-terra",
+		};
+		expect(() => assertOpenRouterAllowlisted(sneakyModel)).toThrow(/openrouter\/openai\/gpt-5\.6-terra/);
+	});
+
+	it("accepts models with pre-prefixed openrouter/ selector without double-prefixing", () => {
+		usePolicy({ schema_version: 1, approved_models: ["openrouter/z-ai/glm-5.3-flash"] });
+		expect(() => assertOpenRouterAllowlisted(openRouterModel("openrouter/z-ai/glm-5.3-flash"))).not.toThrow();
+	});
+
+	it("honors in-memory approved selectors test seam", () => {
+		__openRouterAllowlistForTesting.setApprovedSelectors(["openrouter/custom/model"]);
+		expect(() => assertOpenRouterAllowlisted(openRouterModel("custom/model"))).not.toThrow();
+		expect(() => assertOpenRouterAllowlisted(openRouterModel("z-ai/glm-5.3-flash"))).toThrow(
+			AIError.ConfigurationError,
+		);
+		__openRouterAllowlistForTesting.reset();
+	});
 });
