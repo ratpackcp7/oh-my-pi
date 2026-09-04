@@ -75,6 +75,7 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
+import { assertOpenRouterAllowlisted } from "./openrouter-allowlist";
 import { resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
@@ -883,6 +884,7 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	assertOpenRouterAllowlisted(model);
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
 			withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
@@ -1472,6 +1474,7 @@ function streamSimpleRequest<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	assertOpenRouterAllowlisted(model);
 	const inputOptions = (options || {}) as SimpleStreamOptions;
 	const baseOptions = { ...inputOptions, fetch: inputOptions.fetch ?? defaultFetchForModel(model) };
 	const debugOptions = withExtraCaFetch(withRequestDebugFetch(baseOptions));

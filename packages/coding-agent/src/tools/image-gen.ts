@@ -5,6 +5,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import {
 	type ApiKey,
 	type FetchImpl,
+	assertOpenRouterAllowlisted,
 	getEnvApiKey,
 	getOpenRouterHeaders,
 	isOfficialCodexApiUrl,
@@ -1527,6 +1528,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					}
 
 					if (provider === "openrouter") {
+						assertOpenRouterAllowlisted({ provider: "openrouter", id: resolvedModel });
 						const prompt = assemblePrompt(params);
 						const contentParts: OpenRouterContentPart[] = [{ type: "text", text: prompt }];
 						for (const image of resolvedImages) {

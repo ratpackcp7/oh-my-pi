@@ -1,5 +1,6 @@
-import { type ApiKey, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
+import { type ApiKey, assertOpenRouterAllowlisted, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 
 import { getDiagnostics } from "./diagnostics";
 import { EXTRACTION_SYSTEM_PROMPT, EXTRACTION_USER_TEMPLATE } from "./prompts";
@@ -114,6 +115,10 @@ export class ExtractionClient {
 		maxTokens: number,
 		apiKey = "",
 	): Promise<string> {
+		if (hostMatchesUrl(this.baseUrl, "openrouter")) {
+			assertOpenRouterAllowlisted({ provider: "openrouter", id: model });
+		}
+
 		const response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
 			method: "POST",
 			headers: authHeader(apiKey),

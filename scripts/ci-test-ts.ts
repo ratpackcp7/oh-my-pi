@@ -30,6 +30,8 @@ interface TestCommand {
 type CodingAgentTestPartition = Record<CodingAgentBucket, string[]>;
 
 const repoRoot = path.join(import.meta.dir, "..");
+const openRouterAllowlistTestPreload = path.join(repoRoot, "packages/ai/test/openrouter-allowlist-test-preload.ts");
+const openRouterAllowlistTestPreloadArgs = ["--preload", openRouterAllowlistTestPreload];
 const args = process.argv.slice(2);
 const isDryRun = args.includes("--dry-run");
 const requestedMode = args.find(arg => !arg.startsWith("--")) ?? "all";
@@ -207,7 +209,7 @@ function workspaceTestCommand(pkg: string, parallel: number, options: { extraArg
 	return {
 		label: pkg,
 		cwd: pkg,
-		command: ["bun", "test", ...extraArgs],
+		command: ["bun", "test", ...openRouterAllowlistTestPreloadArgs, ...extraArgs],
 		parallel,
 	};
 }
@@ -317,7 +319,7 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 		commands.push({
 			label: `packages/coding-agent (${plan.label}; ${testFiles.length} files; parallel=${plan.parallel}${chunkLabel}; ${chunk.length} files)`,
 			cwd: "packages/coding-agent",
-			command: ["bun", "test", ...onlyFailuresArgs, ...chunk],
+			command: ["bun", "test", ...openRouterAllowlistTestPreloadArgs, ...onlyFailuresArgs, ...chunk],
 			parallel: plan.parallel,
 		});
 	}

@@ -1,9 +1,23 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { installOpenRouterAllowlistTestPolicy } from "./openrouter-allowlist-test-helpers";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { type Context, type Model, type ModelSpec, OPENAI_MAX_OUTPUT_TOKENS } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+
+let cleanupAllowlistTestPolicy: (() => void) | undefined;
+
+beforeAll(() => {
+	cleanupAllowlistTestPolicy = installOpenRouterAllowlistTestPolicy([
+		"openrouter/z-ai/glm-4.7",
+		"openrouter/moonshotai/kimi-k2.5",
+	]);
+});
+
+afterAll(() => {
+	cleanupAllowlistTestPolicy?.();
+});
 
 // Output-token wire policy for OpenAI-family providers:
 //   - Non-aggregator completions + non-OpenRouter responses: clamp to

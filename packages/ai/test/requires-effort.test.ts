@@ -1,9 +1,23 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { installOpenRouterAllowlistTestPolicy } from "./openrouter-allowlist-test-helpers";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec, ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
+
+let cleanupAllowlistTestPolicy: (() => void) | undefined;
+
+beforeAll(() => {
+	cleanupAllowlistTestPolicy = installOpenRouterAllowlistTestPolicy([
+		"openrouter/test/router-model",
+		"openrouter/test/router-model-thinking",
+	]);
+});
+
+afterAll(() => {
+	cleanupAllowlistTestPolicy?.();
+});
 
 interface CapturedBody {
 	model?: string;
