@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { __openRouterAllowlistForTesting } from "@oh-my-pi/pi-ai/openrouter-allowlist";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { installOpenRouterAllowlistTestPolicy } from "./openrouter-allowlist-test-helpers";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
@@ -15,8 +15,10 @@ import type {
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
+let cleanupAllowlistTestPolicy: (() => void) | undefined;
+
 beforeAll(() => {
-	__openRouterAllowlistForTesting.setApprovedSelectors([
+	cleanupAllowlistTestPolicy = installOpenRouterAllowlistTestPolicy([
 		"openrouter/anthropic/claude-haiku-latest",
 		"openrouter/anthropic/claude-haiku-latest:online",
 		"openrouter/anthropic/claude-fable-5",
@@ -28,7 +30,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-	__openRouterAllowlistForTesting.reset();
+	cleanupAllowlistTestPolicy?.();
 });
 
 const context: Context = {

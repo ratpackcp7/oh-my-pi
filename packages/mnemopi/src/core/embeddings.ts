@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as nodePath from "node:path";
-import { type ApiKey, getOpenRouterHeaders, withAuth } from "@oh-my-pi/pi-ai";
+import { type ApiKey, assertOpenRouterAllowlisted, getOpenRouterHeaders, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
@@ -432,7 +432,12 @@ async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | nul
 		return null;
 	}
 
-	const body = JSON.stringify({ model: defaultModel(), input: texts });
+	const model = defaultModel();
+	if (!isCustom) {
+		assertOpenRouterAllowlisted({ provider: "openrouter", id: model });
+	}
+
+	const body = JSON.stringify({ model, input: texts });
 	try {
 		// withAuth re-resolves the key on 401 (force-refresh, then sibling
 		// rotation) when `apiKey` is a resolver. The 429 backoff stays inside

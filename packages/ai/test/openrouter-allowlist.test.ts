@@ -4,13 +4,22 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import {
-	__openRouterAllowlistForTesting,
 	assertOpenRouterAllowlisted,
+	assertOpenRouterSelectorAllowlisted,
+	CANONICAL_OPENROUTER_ALLOWLIST_PATH,
 	formatOpenRouterSelector,
+	isValidApprovedOpenRouterSelector,
+	loadApprovedOpenRouterSelectors,
+	parseOpenRouterAllowlistPolicy,
 } from "@oh-my-pi/pi-ai/openrouter-allowlist";
 import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import {
+	installOpenRouterAllowlistTestPolicy,
+	withOpenRouterAllowlistTestPolicyPath,
+	writeOpenRouterAllowlistPolicyFile,
+} from "./openrouter-allowlist-test-helpers";
 
 const context: Context = {
 	systemPrompt: [],
@@ -47,17 +56,13 @@ function codexModel(): Model<Api> {
 	});
 }
 
-function writePolicy(dir: string, contents: unknown): string {
-	const policyPath = path.join(dir, "openrouter-allowlist.json");
-	fs.writeFileSync(policyPath, JSON.stringify(contents));
-	return policyPath;
-}
-
 describe("openrouter allowlist", () => {
+	let cleanupTestPolicy: (() => void) | undefined;
 	let tempDir: string | undefined;
 
 	afterEach(() => {
-		__openRouterAllowlistForTesting.setPolicyPath(undefined);
+		cleanupTestPolicy?.();
+		cleanupTestPolicy = undefined;
 		if (tempDir) {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 			tempDir = undefined;
@@ -66,11 +71,52 @@ describe("openrouter allowlist", () => {
 
 	function usePolicy(contents: unknown): void {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-openrouter-allowlist-"));
-		__openRouterAllowlistForTesting.setPolicyPath(writePolicy(tempDir, contents));
+		const policyPath = writeOpenRouterAllowlistPolicyFile(tempDir, contents);
+		cleanupTestPolicy = withOpenRouterAllowlistTestPolicyPath(policyPath);
 	}
+
+	it("uses the fixed canonical production policy path", () => {
+		expect(CANONICAL_OPENROUTER_ALLOWLIST_PATH).toBe("/home/chris/.config/cp7/openrouter-allowlist.json");
+	});
 
 	it("formats selectors as provider/id", () => {
 		expect(formatOpenRouterSelector("openrouter", "z-ai/glm-5.3-flash")).toBe("openrouter/z-ai/glm-5.3-flash");
+	});
+
+	it("validates approved selector entries strictly", () => {
+		expect(isValidApprovedOpenRouterSelector("openrouter/z-ai/glm-5.3-flash")).toBe(true);
+		for (const entry of [
+			"",
+			"openrouter/",
+			"openrouter",
+			" z-ai/glm-5.3-flash",
+			"openrouter/z-ai/glm-5.3-flash ",
+			"anthropic/claude-sonnet-5",
+		]) {
+			expect(isValidApprovedOpenRouterSelector(entry)).toBe(false);
+		}
+	});
+
+	it("parses empty deny-all policy", () => {
+		expect(parseOpenRouterAllowlistPolicy(JSON.stringify({ schema_version: 1, approved_models: [] }))).toEqual(
+			new Set(),
+		);
+	});
+
+	it("rejects duplicate and whitespace-invalid policy entries", () => {
+		expect(
+			parseOpenRouterAllowlistPolicy(
+				JSON.stringify({
+					schema_version: 1,
+					approved_models: ["openrouter/z-ai/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash"],
+				}),
+			),
+		).toBeNull();
+		expect(
+			parseOpenRouterAllowlistPolicy(
+				JSON.stringify({ schema_version: 1, approved_models: [" openrouter/z-ai/glm-5.3-flash"] }),
+			),
+		).toBeNull();
 	});
 
 	it("denies Terra before dispatch", () => {
@@ -109,7 +155,7 @@ describe("openrouter allowlist", () => {
 
 	it("denies all OpenRouter models when the policy file is missing", () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-openrouter-allowlist-"));
-		__openRouterAllowlistForTesting.setPolicyPath(path.join(tempDir, "missing.json"));
+		cleanupTestPolicy = withOpenRouterAllowlistTestPolicyPath(path.join(tempDir, "missing.json"));
 		expect(() => assertOpenRouterAllowlisted(openRouterModel("z-ai/glm-5.3-flash"))).toThrow(
 			AIError.ConfigurationError,
 		);
@@ -119,7 +165,7 @@ describe("openrouter allowlist", () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-openrouter-allowlist-"));
 		const policyPath = path.join(tempDir, "openrouter-allowlist.json");
 		fs.writeFileSync(policyPath, "{ not-json");
-		__openRouterAllowlistForTesting.setPolicyPath(policyPath);
+		cleanupTestPolicy = withOpenRouterAllowlistTestPolicyPath(policyPath);
 		expect(() => assertOpenRouterAllowlisted(openRouterModel("z-ai/glm-5.3-flash"))).toThrow(
 			AIError.ConfigurationError,
 		);
@@ -127,6 +173,13 @@ describe("openrouter allowlist", () => {
 
 	it("denies all OpenRouter models when the schema version is unsupported", () => {
 		usePolicy({ schema_version: 2, approved_models: ["openrouter/z-ai/glm-5.3-flash"] });
+		expect(() => assertOpenRouterAllowlisted(openRouterModel("z-ai/glm-5.3-flash"))).toThrow(
+			AIError.ConfigurationError,
+		);
+	});
+
+	it("denies all OpenRouter models for empty deny-all policy", () => {
+		usePolicy({ schema_version: 1, approved_models: [] });
 		expect(() => assertOpenRouterAllowlisted(openRouterModel("z-ai/glm-5.3-flash"))).toThrow(
 			AIError.ConfigurationError,
 		);
@@ -157,12 +210,28 @@ describe("openrouter allowlist", () => {
 		expect(() => assertOpenRouterAllowlisted(openRouterModel("openrouter/z-ai/glm-5.3-flash"))).not.toThrow();
 	});
 
-	it("honors in-memory approved selectors test seam", () => {
-		__openRouterAllowlistForTesting.setApprovedSelectors(["openrouter/custom/model"]);
-		expect(() => assertOpenRouterAllowlisted(openRouterModel("custom/model"))).not.toThrow();
-		expect(() => assertOpenRouterAllowlisted(openRouterModel("z-ai/glm-5.3-flash"))).toThrow(
-			AIError.ConfigurationError,
-		);
-		__openRouterAllowlistForTesting.reset();
+	it("checks selectors with pure helpers without mutating production enforcement", () => {
+		const approved = new Set(["openrouter/custom/model"]);
+		expect(() =>
+			assertOpenRouterSelectorAllowlisted("openrouter/custom/model", approved, "/tmp/policy.json"),
+		).not.toThrow();
+		expect(() =>
+			assertOpenRouterSelectorAllowlisted("openrouter/z-ai/glm-5.3-flash", approved, "/tmp/policy.json"),
+		).toThrow(AIError.ConfigurationError);
+	});
+
+	it("loads approved selectors from an explicit path via pure loader", () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-openrouter-allowlist-"));
+		const policyPath = writeOpenRouterAllowlistPolicyFile(tempDir, {
+			schema_version: 1,
+			approved_models: ["openrouter/z-ai/glm-5.3-flash"],
+		});
+		expect(loadApprovedOpenRouterSelectors(policyPath)).toEqual(new Set(["openrouter/z-ai/glm-5.3-flash"]));
+	});
+
+	it("uses test-mode policy path without affecting production path constant", () => {
+		cleanupTestPolicy = installOpenRouterAllowlistTestPolicy(["openrouter/z-ai/glm-5.3-flash"]);
+		expect(() => assertOpenRouterAllowlisted(openRouterModel("z-ai/glm-5.3-flash"))).not.toThrow();
+		expect(CANONICAL_OPENROUTER_ALLOWLIST_PATH).toBe("/home/chris/.config/cp7/openrouter-allowlist.json");
 	});
 });
