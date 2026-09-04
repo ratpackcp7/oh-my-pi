@@ -234,4 +234,11 @@ describe("openrouter allowlist", () => {
 		expect(() => assertOpenRouterAllowlisted(openRouterModel("z-ai/glm-5.3-flash"))).not.toThrow();
 		expect(CANONICAL_OPENROUTER_ALLOWLIST_PATH).toBe("/home/chris/.config/cp7/openrouter-allowlist.json");
 	});
+
+	it("test preload bootstraps mock models without enabling production path override", () => {
+		expect(process.env.OMP_OPENROUTER_ALLOWLIST_TEST_MODE).toBe("1");
+		expect(process.env.OMP_OPENROUTER_ALLOWLIST_PATH).toBeTruthy();
+		expect(() => assertOpenRouterAllowlisted(openRouterModel("google/gemini-3.5-flash"))).not.toThrow();
+		expect(CANONICAL_OPENROUTER_ALLOWLIST_PATH).toBe("/home/chris/.config/cp7/openrouter-allowlist.json");
+	});
 });
