@@ -1,6 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import { $flag, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { assertOpenRouterAllowlisted } from "../openrouter-allowlist";
 import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
@@ -933,10 +934,12 @@ const streamOpenAIResponsesOnce = (
  * loop. Transient stream failures are retried inside the attempt so stateful
  * Responses request metadata remains stable.
  */
-export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) =>
-	withReplaySafeStreamRetry(model, context, options, streamOpenAIResponsesOnce, {
+export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) => {
+	assertOpenRouterAllowlisted(model);
+	return withReplaySafeStreamRetry(model, context, options, streamOpenAIResponsesOnce, {
 		retryEmptyCompletion: true,
 	});
+};
 
 function isResponsesPromptCacheableContentBlock(block: unknown): block is ResponseInputContent {
 	if (typeof block !== "object" || block === null || !("type" in block)) return false;
