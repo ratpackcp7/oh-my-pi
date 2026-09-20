@@ -288,10 +288,13 @@ export class SelectorController {
 				)
 			: undefined;
 		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
-		const sessionStats = this.ctx.session.sessionManager.getUsageStatistics();
-		const actualSpend = formatActualSpendSection(reports);
-		const estimatedValue = formatEstimatedTokenValue(sessionStats.cost);
-		const spendSummary = [actualSpend, estimatedValue].filter(Boolean).join("\n\n");
+		const renderSpend = (currentReports: UsageReport[]): string =>
+			[
+				formatActualSpendSection(currentReports),
+				formatEstimatedTokenValue(this.ctx.session.sessionManager.getUsageStatistics().cost),
+			]
+				.filter(Boolean)
+				.join("\n\n");
 		const done = () => {
 			overlayHandle?.hide();
 			this.focusActiveEditorArea();
@@ -299,22 +302,22 @@ export class SelectorController {
 		};
 		const dashboard = new UsageDashboardComponent({
 			reports,
-			spendSummary,
-			renderDetail: width =>
-				[
+			renderSpend,
+			renderDetail: (width, currentReports) => {
+				return [
 					renderUsageReports(
-						reports,
+						currentReports,
 						theme,
 						Date.now(),
 						width,
 						provider => (provider === currentProvider ? activeAccount : undefined),
 						usageModelSelectors,
 					),
-					actualSpend,
-					estimatedValue,
+					renderSpend(currentReports),
 				]
 					.filter(Boolean)
-					.join("\n\n"),
+					.join("\n\n");
+			},
 			loadActivity: async push => {
 				// Show whatever the stats DB already has, then re-query after an
 				// incremental session sync so the heatmap converges on fresh data.
@@ -324,6 +327,11 @@ export class SelectorController {
 			},
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
+			onRefresh: async () => {
+				const fresh = await this.ctx.session.fetchUsageReports();
+				if (!fresh || fresh.length === 0) return reports;
+				return fresh;
+			},
 		});
 		const overlayHandle = this.#showFullscreenMenu(dashboard);
 	}

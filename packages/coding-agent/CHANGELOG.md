@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The fullscreen `/usage` dashboard can now re-fetch every provider on demand: `↻ refresh` sits on the `checked … ago` line, `r` triggers the fetch (`↻ refreshing…` while it runs), and the refreshed reports update the cards, the timestamp, the spend header, and the detailed report.
+
 ### Fixed
 
 - Explicit models that exist only in a built-in provider's live catalog now resolve on fresh startup instead of failing as missing before that provider's model discovery runs.

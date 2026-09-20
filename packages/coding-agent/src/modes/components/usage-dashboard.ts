@@ -288,13 +288,17 @@ export function buildHeatmapLayout(points: DailyActivityPoint[], weeks: number, 
 /** Callbacks and data sources for {@link UsageDashboardComponent}. */
 export interface UsageDashboardOptions {
 	reports: UsageReport[];
-	/** Authoritative spend plus explicitly scoped local estimate, rendered above quota cards. */
-	spendSummary?: string;
+	/**
+	 * Authoritative spend plus explicitly scoped local estimate, rendered above
+	 * quota cards. Re-invoked per render so a refresh is reflected here too.
+	 */
+	renderSpend?: (reports: UsageReport[]) => string | undefined;
 	/**
 	 * Full classic `/usage` report for the expanded detail view; re-invoked per
-	 * terminal width.
+	 * terminal width. Receives the current reports so the detail view reflects
+	 * refreshed data.
 	 */
-	renderDetail: (width: number) => string;
+	renderDetail: (width: number, reports: UsageReport[]) => string;
 	/**
 	 * Stream daily activity into the heatmap: push cached DB rows immediately,
 	 * then push again after an incremental session sync. Resolves when the sync
@@ -303,6 +307,12 @@ export interface UsageDashboardOptions {
 	loadActivity: (push: (points: DailyActivityPoint[]) => void) => Promise<void>;
 	requestRender: () => void;
 	onClose: () => void;
+	/**
+	 * Re-fetch usage reports from all providers: resolves with the fresh
+	 * reports array. When provided, the dashboard shows a `↻ refresh` affordance
+	 * bound to the `r` key.
+	 */
+	onRefresh?: () => Promise<UsageReport[]>;
 }
 
 const CARD_MIN_WIDTH = 32;
@@ -321,6 +331,7 @@ export class UsageDashboardComponent implements Component {
 	#detailCache: { width: number; lines: string[] } | null = null;
 	#lastViewportRows = 10;
 	#closed = false;
+	#refreshing = false;
 
 	constructor(options: UsageDashboardOptions) {
 		this.#options = options;
@@ -346,6 +357,25 @@ export class UsageDashboardComponent implements Component {
 
 	dispose(): void {
 		this.#closed = true;
+	}
+
+	async #refresh(): Promise<void> {
+		if (this.#refreshing || !this.#options.onRefresh) return;
+		this.#refreshing = true;
+		this.#options.requestRender();
+		try {
+			const reports = await this.#options.onRefresh();
+			if (this.#closed) return;
+			this.#options.reports = reports;
+			this.#nowMs = Date.now();
+			this.#cards = buildProviderCards(reports, this.#nowMs);
+			this.#detailCache = null;
+		} catch {
+			// Silently swallow — the stale data stays visible.
+		} finally {
+			this.#refreshing = false;
+			if (!this.#closed) this.#options.requestRender();
+		}
 	}
 
 	// ---------------------------------------------------------------------------
@@ -534,8 +564,9 @@ export class UsageDashboardComponent implements Component {
 
 	#overviewLines(innerWidth: number): string[] {
 		const lines: string[] = [];
-		if (this.#options.spendSummary) {
-			lines.push(...this.#options.spendSummary.split("\n").map(line => truncateToWidth(line, innerWidth)));
+		const spend = this.#options.renderSpend?.(this.#options.reports);
+		if (spend) {
+			lines.push(...spend.split("\n").map(line => truncateToWidth(line, innerWidth)));
 			lines.push("");
 		}
 		lines.push(...this.#renderCardsGrid(innerWidth));
@@ -546,7 +577,10 @@ export class UsageDashboardComponent implements Component {
 
 	#detailLines(innerWidth: number): string[] {
 		if (this.#detailCache?.width !== innerWidth) {
-			this.#detailCache = { width: innerWidth, lines: this.#options.renderDetail(innerWidth).split("\n") };
+			this.#detailCache = {
+				width: innerWidth,
+				lines: this.#options.renderDetail(innerWidth, this.#options.reports).split("\n"),
+			};
 		}
 		return this.#detailCache.lines;
 	}
@@ -568,13 +602,28 @@ export class UsageDashboardComponent implements Component {
 
 		const out: string[] = [];
 		out.push(topBorder(width, title));
-		out.push(row(checkedText ? theme.fg("dim", checkedText) : "", width));
+		const refreshLabel = this.#options.onRefresh
+			? this.#refreshing
+				? theme.fg("dim", "↻ refreshing…")
+				: theme.fg("dim", "↻ refresh")
+			: "";
+		const leftText = checkedText ? theme.fg("dim", checkedText) : "";
+		if (refreshLabel) {
+			const gap = Math.max(1, innerWidth - visibleWidth(leftText) - visibleWidth(refreshLabel));
+			out.push(row(leftText + " ".repeat(gap) + refreshLabel, width));
+		} else {
+			out.push(row(leftText, width));
+		}
 		for (let i = 0; i < contentRows; i++) {
 			out.push(row(contentSource[this.#scroll + i] ?? "", width));
 		}
 		out.push(divider(width));
 		const scrollHint = maxScroll > 0 ? "↑/↓ scroll · " : "";
-		const hint = this.#view === "detail" ? `${scrollHint}Esc back` : `${scrollHint}↵ details · Esc close`;
+		const refreshHint = this.#options.onRefresh ? " · r refresh" : "";
+		const hint =
+			this.#view === "detail"
+				? `${scrollHint}Esc back${refreshHint}`
+				: `${scrollHint}↵ details · Esc close${refreshHint}`;
 		out.push(row(theme.fg("dim", hint), width));
 		out.push(bottomBorder(width));
 		return out;
@@ -608,6 +657,10 @@ export class UsageDashboardComponent implements Component {
 			}
 			this.dispose();
 			this.#options.onClose();
+			return;
+		}
+		if (matchesKey(data, "r") && this.#options.onRefresh) {
+			void this.#refresh();
 			return;
 		}
 		if (

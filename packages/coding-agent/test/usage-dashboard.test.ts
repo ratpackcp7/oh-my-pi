@@ -1,7 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
-import { buildHeatmapLayout, buildProviderCards } from "@oh-my-pi/pi-coding-agent/modes/components/usage-dashboard";
+import {
+	buildHeatmapLayout,
+	buildProviderCards,
+	UsageDashboardComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/components/usage-dashboard";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 function day(day: string, cost: number, requests = 1): DailyActivityPoint {
 	return { day, cost, requests, totalTokens: 0 };
@@ -106,5 +111,77 @@ describe("buildProviderCards", () => {
 		expect(idle.sort()).toEqual(["cursor", "ollama-cloud"]);
 		const unlimited = cards.find(card => card.provider === "ollama-cloud");
 		expect(unlimited?.unlimited).toBe(true);
+	});
+});
+
+function dashboardComponent(options: {
+	reports: UsageReport[];
+	onRefresh?: () => Promise<UsageReport[]>;
+	renderSpend?: (reports: UsageReport[]) => string | undefined;
+}): UsageDashboardComponent {
+	return new UsageDashboardComponent({
+		reports: options.reports,
+		renderSpend: options.renderSpend,
+		renderDetail: () => "detail",
+		loadActivity: async () => {},
+		requestRender: () => {},
+		onClose: () => {},
+		onRefresh: options.onRefresh,
+	});
+}
+
+describe("UsageDashboardComponent refresh", () => {
+	it("advertises the refresh affordance only when a refresh source exists", async () => {
+		await initTheme();
+		const reports = [
+			report("anthropic", "a@x.test", [limit("anthropic", "a", "5h", "5 hour", 0.1, "ok", Date.now() + 1000)]),
+		];
+
+		const plain = dashboardComponent({ reports }).render(100).join("\n");
+		expect(plain).not.toContain("↻ refresh");
+		expect(plain).not.toContain("r refresh");
+
+		const refreshable = dashboardComponent({ reports, onRefresh: async () => reports })
+			.render(100)
+			.join("\n");
+		expect(refreshable).toContain("↻ refresh");
+		expect(refreshable).toContain("r refresh");
+	});
+
+	it("refetches on r and repaints with the fresh reports", async () => {
+		await initTheme();
+		let calls = 0;
+		const stale = report("anthropic", "a@x.test", [
+			limit("anthropic", "a", "5h", "5 hour", 0.1, "ok", Date.now() + 1000),
+		]);
+		stale.fetchedAt = Date.now() - 60_000;
+		const fresh = report("anthropic", "a@x.test", [
+			limit("anthropic", "a", "5h", "5 hour", 0.9, "exhausted", Date.now() + 1000),
+		]);
+
+		const component = dashboardComponent({
+			reports: [stale],
+			renderSpend: current => `spend at ${current[0]?.fetchedAt}`,
+			onRefresh: async () => {
+				calls += 1;
+				return [fresh];
+			},
+		});
+
+		const before = component.render(100).join("\n");
+		expect(before).toContain("checked 1m ago");
+		expect(before).toContain("90%");
+		expect(before).toContain(`spend at ${stale.fetchedAt}`);
+
+		component.handleInput("r");
+		expect(calls).toBe(1);
+		await Bun.sleep(10);
+
+		const after = component.render(100).join("\n");
+		expect(after).not.toContain("checked 1m ago");
+		// The refreshed window is 90% used, so the card must now read 10% free.
+		expect(after).toContain("10%");
+		// The spend header is derived per render, so it follows the refresh too.
+		expect(after).toContain(`spend at ${fresh.fetchedAt}`);
 	});
 });
