@@ -51,9 +51,9 @@ export const USAGE_REPORT_TTL_MS = 5 * 60_000;
 const USAGE_HISTORY_BUCKET_MS = 60 * 60_000;
 
 /**
- * Merge client observed-usage flushes into at most one row per 5 minutes per
- * (install, provider, model): ~300 rows/day per active model per client
- * instead of one row per 10s flush.
+ * Merge client observed-usage flushes into at most one fixed epoch-aligned row
+ * per 5 minutes per (install, provider, model): ~300 rows/day per active model
+ * per client instead of one row per 10s flush.
  */
 const CLIENT_USAGE_BUCKET_MS = 5 * 60_000;
 
@@ -1772,7 +1772,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		const app = report.app?.trim() ?? "";
 		const findBucket = this.#db.query(
 			`SELECT id FROM client_usage
-			 WHERE install_id = ? AND app = ? AND provider = ? AND model = ? AND recorded_at >= ?
+			 WHERE install_id = ? AND app = ? AND provider = ? AND model = ? AND recorded_at >= ? AND recorded_at < ?
 			 ORDER BY recorded_at DESC LIMIT 1`,
 		);
 		const merge = this.#db.query(
@@ -1785,15 +1785,24 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		for (const entry of report.entries) {
-			// Merge into the newest row of the same (install, provider, model)
-			// bucket so 10s client flushes don't accrete one row apiece forever.
-			const bucketFloor = entry.at - CLIENT_USAGE_BUCKET_MS;
-			const existing = findBucket.get(report.installId, app, entry.provider, entry.model, bucketFloor) as {
+			// Merge only into the deterministic epoch-aligned bucket containing the
+			// entry. Storing the bucket start makes sinceMs at a bucket boundary
+			// include the complete aggregate interval and nothing before it.
+			const bucketStart = Math.floor(entry.at / CLIENT_USAGE_BUCKET_MS) * CLIENT_USAGE_BUCKET_MS;
+			const bucketEnd = bucketStart + CLIENT_USAGE_BUCKET_MS;
+			const existing = findBucket.get(
+				report.installId,
+				app,
+				entry.provider,
+				entry.model,
+				bucketStart,
+				bucketEnd,
+			) as {
 				id: number;
 			} | null;
 			if (existing) {
 				merge.run(
-					entry.at,
+					bucketStart,
 					entry.requests,
 					entry.inputTokens,
 					entry.outputTokens,
@@ -1805,7 +1814,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				continue;
 			}
 			insert.run(
-				entry.at,
+				bucketStart,
 				report.installId,
 				app,
 				entry.provider,

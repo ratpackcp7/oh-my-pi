@@ -86,6 +86,8 @@ omp auth-broker status    [--json]
 
 Requests use `Authorization: Bearer <token>`. The server compares against an in-memory token allow-list; the gateway’s implementation uses a timing-safe comparison.
 
+Client-observed usage is consolidated into deterministic five-minute buckets anchored to the Unix epoch. Each bucket is stored with `recorded_at` equal to its start, so a `sinceMs` query at a bucket boundary includes only that bucket and later buckets; adjacent buckets never merge.
+
 `GET /v1/usage` responses may include an optional `health: UsageProviderHealth[]` array, one entry per polled provider: `lastAttemptAt` (every poll), `lastSuccessfulAt` (successful polls only — survives later failures), and while unhealthy `errorCode` (`rate_limited` | `reauth_required` | `provider_unreachable` | `unknown`) plus `nextAllowedAt` (only when upstream gave a retry time, e.g. a 429 `Retry-After`). It's in-memory telemetry sourced from `AuthStorage.getUsageHealth()` — never persisted, never carries credential material.
 
 #### Conditional snapshot long polling

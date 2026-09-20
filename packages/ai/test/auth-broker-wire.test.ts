@@ -611,6 +611,153 @@ describe("auth-broker wire surface", () => {
 		expect(bad.status).toBe(400);
 	});
 
+	test("merges same-model usage within one fixed five-minute bucket", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const bucketMs = 5 * 60_000;
+		const bucketStart = Math.floor((Date.now() - 10 * bucketMs) / bucketMs) * bucketMs;
+		await client.reportClientUsage({
+			installId: "fixed-bucket-install",
+			entries: [
+				{
+					at: bucketStart + 1_000,
+					provider: "anthropic",
+					model: "claude-x",
+					requests: 2,
+					inputTokens: 100,
+					outputTokens: 40,
+					cacheReadTokens: 10,
+					cacheWriteTokens: 5,
+					costUsd: 1.25,
+				},
+			],
+		});
+		await client.reportClientUsage({
+			installId: "fixed-bucket-install",
+			entries: [
+				{
+					at: bucketStart + bucketMs - 1_000,
+					provider: "anthropic",
+					model: "claude-x",
+					requests: 3,
+					inputTokens: 200,
+					outputTokens: 80,
+					cacheReadTokens: 20,
+					cacheWriteTokens: 10,
+					costUsd: 2.5,
+				},
+			],
+		});
+
+		const summary = await client.fetchClientUsageSummary();
+		expect(summary.clients.find(c => c.installId === "fixed-bucket-install")?.providers).toEqual([
+			{
+				provider: "anthropic",
+				requests: 5,
+				inputTokens: 300,
+				outputTokens: 120,
+				cacheReadTokens: 30,
+				cacheWriteTokens: 15,
+				costUsd: 3.75,
+			},
+		]);
+	});
+
+	test("does not merge entries across a fixed bucket boundary", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const bucketMs = 5 * 60_000;
+		const bucketStart = Math.floor((Date.now() - 10 * bucketMs) / bucketMs) * bucketMs;
+		const before = {
+			at: bucketStart + bucketMs - 1,
+			provider: "anthropic" as const,
+			model: "claude-x",
+			requests: 2,
+			inputTokens: 100,
+			outputTokens: 40,
+			cacheReadTokens: 10,
+			cacheWriteTokens: 5,
+			costUsd: 1.25,
+		};
+		const after = { ...before, at: bucketStart + bucketMs + 1, requests: 3, costUsd: 2.5 };
+		await client.reportClientUsage({ installId: "boundary-install", entries: [before] });
+		await client.reportClientUsage({ installId: "boundary-install", entries: [after] });
+
+		const all = await client.fetchClientUsageSummary();
+		expect(all.clients.find(c => c.installId === "boundary-install")?.providers).toEqual([
+			{
+				provider: "anthropic",
+				requests: 5,
+				inputTokens: 200,
+				outputTokens: 80,
+				cacheReadTokens: 20,
+				cacheWriteTokens: 10,
+				costUsd: 3.75,
+			},
+		]);
+
+		const later = await client.fetchClientUsageSummary({ sinceMs: bucketStart + bucketMs });
+		expect(later.clients.find(c => c.installId === "boundary-install")?.providers).toEqual([
+			{
+				provider: "anthropic",
+				requests: 3,
+				inputTokens: 100,
+				outputTokens: 40,
+				cacheReadTokens: 10,
+				cacheWriteTokens: 5,
+				costUsd: 2.5,
+			},
+		]);
+	});
+
+	test("does not carry pre-midnight usage into the post-midnight sinceMs window", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const midnight = Date.parse("2026-01-03T00:00:00-06:00");
+		await client.reportClientUsage({
+			installId: "midnight-install",
+			entries: [
+				{
+					at: Date.parse("2026-01-02T23:59:59.999-06:00"),
+					provider: "anthropic",
+					model: "claude-x",
+					requests: 1,
+					inputTokens: 1_000,
+					outputTokens: 100,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 0,
+					costUsd: 9,
+				},
+			],
+		});
+		await client.reportClientUsage({
+			installId: "midnight-install",
+			entries: [
+				{
+					at: Date.parse("2026-01-03T00:01:00-06:00"),
+					provider: "anthropic",
+					model: "claude-x",
+					requests: 2,
+					inputTokens: 2_000,
+					outputTokens: 200,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 0,
+					costUsd: 18,
+				},
+			],
+		});
+
+		const summary = await client.fetchClientUsageSummary({ sinceMs: midnight });
+		expect(summary.clients.find(c => c.installId === "midnight-install")?.providers).toEqual([
+			{
+				provider: "anthropic",
+				requests: 2,
+				inputTokens: 2_000,
+				outputTokens: 200,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				costUsd: 18,
+			},
+		]);
+	});
+
 	test("Unknown route returns 404", async () => {
 		const res = await fetch(`${handle!.url}/v1/nope`, {
 			headers: { Authorization: `Bearer ${token}` },
