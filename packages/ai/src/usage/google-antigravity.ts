@@ -155,12 +155,11 @@ function parseWindow(
 }
 
 function buildAmount(info: AntigravityQuotaInfo): UsageAmount {
-	const apiRemainingFraction = clampFraction(info.remainingFraction);
-	// Observed Antigravity responses omit remainingFraction for exhausted
-	// Google/Gemini counters and keep only resetTime. Treat that shape as
-	// "blocked until reset" rather than unknown so a healthy sibling backend
-	// counter cannot mask it during dedupe.
-	const remainingFraction = apiRemainingFraction ?? (info.resetTime ? 0 : undefined);
+	// A missing remainingFraction is unknown, not exhausted: fabricating
+	// 0 remaining / 100% used for reset-only entries poisoned every
+	// downstream consumer. Explicit 0 remaining still reports exhausted via
+	// getUsageStatus; window/reset metadata is preserved by parseWindow.
+	const remainingFraction = clampFraction(info.remainingFraction);
 	const amount: UsageAmount = { unit: "percent" };
 	if (remainingFraction === undefined) return amount;
 	const usedFraction = 1 - remainingFraction;

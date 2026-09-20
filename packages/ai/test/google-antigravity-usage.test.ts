@@ -114,7 +114,7 @@ describe("antigravity usage provider", () => {
 		expect(report!.limits.length).toBe(1);
 	});
 
-	it("treats reset-only quota entries as exhausted and preserves reset time", async () => {
+	it("keeps fraction data when merging a reset-only sibling and preserves reset time", async () => {
 		const now = Date.now();
 		const resetTime = new Date(now + 4 * 3600_000).toISOString();
 		const payload = {
@@ -128,9 +128,8 @@ describe("antigravity usage provider", () => {
 			makeCtx(fakeFetch(payload)),
 		);
 		expect(report!.limits.length).toBe(1);
-		expect(report!.limits[0]!.amount.remainingFraction).toBe(0);
-		expect(report!.limits[0]!.amount.usedFraction).toBe(1);
-		expect(report!.limits[0]!.status).toBe("exhausted");
+		expect(report!.limits[0]!.amount.remainingFraction).toBe(0.3);
+		expect(report!.limits[0]!.status).toBe("ok");
 		expect(report!.limits[0]!.window).toBeDefined();
 		expect(report!.limits[0]!.window!.resetsAt).toBeGreaterThan(now);
 	});
@@ -160,8 +159,8 @@ describe("antigravity usage provider", () => {
 		expect(report!.limits.length).toBe(2);
 		const googleLimit = report!.limits.find(limit => limit.label === "Usage (Google)");
 		const anthropicLimit = report!.limits.find(limit => limit.label === "Usage (Anthropic)");
-		expect(googleLimit?.amount.remainingFraction).toBe(0);
-		expect(googleLimit?.status).toBe("exhausted");
+		expect(googleLimit?.amount.remainingFraction).toBeUndefined();
+		expect(googleLimit?.status).toBe("unknown");
 		expect(anthropicLimit?.amount.remainingFraction).toBe(1);
 		expect(anthropicLimit?.status).toBe("ok");
 	});
@@ -310,6 +309,46 @@ describe("antigravity usage provider", () => {
 		expect(report!.limits[0]!.amount.remainingFraction).toBe(0.2);
 		expect(report!.limits[1]!.amount.remainingFraction).toBe(0.5);
 		expect(report!.limits[2]!.amount.remainingFraction).toBe(0.9);
+	});
+
+	it("leaves reset-only quota entries percentage-unknown and preserves reset time", async () => {
+		// Missing remainingFraction is unknown, not exhausted: fabricating
+		// 100% used here poisoned every downstream consumer (capacity API,
+		// Myline) whenever the provider omitted percentages but sent resetTime.
+		const now = Date.now();
+		const resetTime = new Date(now + 4 * 3600_000).toISOString();
+		const payload = {
+			models: {
+				modelA: makeApiModel("Model A", { remainingFraction: undefined, tier: "default", resetTime }),
+			},
+		};
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential(), signal: undefined },
+			makeCtx(fakeFetch(payload)),
+		);
+		expect(report!.limits.length).toBe(1);
+		expect(report!.limits[0]!.amount.remainingFraction).toBeUndefined();
+		expect(report!.limits[0]!.amount.used).toBeUndefined();
+		expect(report!.limits[0]!.status).toBe("unknown");
+		expect(report!.limits[0]!.window).toBeDefined();
+		expect(report!.limits[0]!.window!.resetsAt).toBeGreaterThan(now);
+	});
+
+	it("still reports explicit zero remaining as exhausted", async () => {
+		const now = Date.now();
+		const resetTime = new Date(now + 4 * 3600_000).toISOString();
+		const payload = {
+			models: {
+				modelA: makeApiModel("Model A", { remainingFraction: 0, tier: "default", resetTime }),
+			},
+		};
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential(), signal: undefined },
+			makeCtx(fakeFetch(payload)),
+		);
+		expect(report!.limits.length).toBe(1);
+		expect(report!.limits[0]!.amount.remainingFraction).toBe(0);
+		expect(report!.limits[0]!.status).toBe("exhausted");
 	});
 
 	it("returns null when credential has no projectId", async () => {
