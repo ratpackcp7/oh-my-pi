@@ -249,7 +249,7 @@ export interface UsageHistoryQuery {
  * to the install that produced it.
  */
 export interface ObservedUsageEntry {
-	/** Epoch ms of the newest request folded into this bucket. */
+	/** Epoch ms of the newest request folded into this flush; the broker stores the fixed bucket start. */
 	at: number;
 	provider: Provider;
 	model: string;
