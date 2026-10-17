@@ -720,6 +720,14 @@ const USAGE_FAILURE_BACKOFF_MS = 10_000;
  * While active, providers with `activeReportTtlMs` refresh on that shorter TTL.
  */
 const USAGE_ACTIVE_WINDOW_MS = 10 * 60_000;
+/**
+ * After a provider answers a usage fetch with 429, its credentials wait at
+ * least this long (or until `Retry-After`, when later) before fetching again,
+ * instead of the short failure back-off that would keep the limit tripped.
+ */
+const USAGE_RATE_LIMIT_BACKOFF_MS = USAGE_REPORT_TTL_MS;
+/** How long after a 429 a provider refreshes on the default TTL even while usage is moving. */
+const USAGE_RATE_LIMIT_QUIET_MS = 30 * 60_000;
 
 /** True when any limit's used amount differs between two reports, or a limit appeared or went away. */
 function usageLimitsChanged(prior: UsageReport, next: UsageReport): boolean {
@@ -1382,6 +1390,8 @@ export class AuthStorage {
 	#usageRequestInFlight: Map<string, Promise<UsageReport | null>> = new Map();
 	/** Cache key → time until which its usage counts as moving (see USAGE_ACTIVE_WINDOW_MS). */
 	#usageActiveUntil: Map<string, number> = new Map();
+	/** Provider → its latest usage 429: when, and the `Retry-After` time if upstream sent one. */
+	#usageRateLimited: Map<Provider, { at: number; nextAllowedAt?: number }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	/** Per-provider usage-fetch telemetry (see {@link AuthStorage.getUsageHealth}); in-memory only, not persisted. */
@@ -3592,7 +3602,10 @@ export class AuthStorage {
 				? (this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value ?? null)
 				: null;
 			const backoffJitter = USAGE_FAILURE_BACKOFF_MS * (Math.random() * 0.5 - 0.25);
-			const coolDown = Date.now() + USAGE_FAILURE_BACKOFF_MS + backoffJitter;
+			const coolDown = Math.max(
+				Date.now() + USAGE_FAILURE_BACKOFF_MS + backoffJitter,
+				this.#usageRateLimitBackoffUntil(request.provider),
+			);
 			this.#usageCache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
 		})().finally(() => {
@@ -3612,6 +3625,8 @@ export class AuthStorage {
 		const activeTtlMs = this.#resolveUsageProvider(request.provider)?.activeReportTtlMs;
 		if (activeTtlMs === undefined || !Number.isFinite(activeTtlMs) || activeTtlMs <= 0) return USAGE_REPORT_TTL_MS;
 		const now = Date.now();
+		const rateLimitedAt = this.#usageRateLimited.get(request.provider)?.at;
+		if (rateLimitedAt !== undefined && now - rateLimitedAt < USAGE_RATE_LIMIT_QUIET_MS) return USAGE_REPORT_TTL_MS;
 		const prior = this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value;
 		if (prior && usageLimitsChanged(prior, report)) {
 			this.#usageActiveUntil.set(cacheKey, now + USAGE_ACTIVE_WINDOW_MS);
@@ -3620,6 +3635,16 @@ export class AuthStorage {
 		if (activeUntil !== undefined && activeUntil > now) return Math.min(activeTtlMs, USAGE_REPORT_TTL_MS);
 		this.#usageActiveUntil.delete(cacheKey);
 		return USAGE_REPORT_TTL_MS;
+	}
+	/**
+	 * Earliest time a provider's credentials may fetch usage again after its
+	 * latest 429: `Retry-After` or USAGE_RATE_LIMIT_BACKOFF_MS, whichever is
+	 * later. 0 when the provider has not been rate-limited.
+	 */
+	#usageRateLimitBackoffUntil(provider: Provider): number {
+		const rateLimited = this.#usageRateLimited.get(provider);
+		if (!rateLimited) return 0;
+		return Math.max(rateLimited.at + USAGE_RATE_LIMIT_BACKOFF_MS, rateLimited.nextAllowedAt ?? 0);
 	}
 	/**
 	 * Append a freshly fetched report to durable usage history (when the store
@@ -4321,6 +4346,9 @@ export class AuthStorage {
 		attemptedAt: number,
 		outcome: { success: true } | { success: false; failure: UsageFetchFailure },
 	): void {
+		if (!outcome.success && outcome.failure.errorCode === "rate_limited") {
+			this.#usageRateLimited.set(provider, { at: attemptedAt, nextAllowedAt: outcome.failure.nextAllowedAt });
+		}
 		const previous = this.#usageHealth.get(provider);
 		this.#usageHealth.set(provider, {
 			provider,

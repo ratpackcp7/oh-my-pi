@@ -1193,3 +1193,96 @@ describe("AuthStorage usage cache: active refresh", () => {
 		}
 	});
 });
+
+describe("AuthStorage usage cache: rate-limit back-off", () => {
+	function anthropicTtlMs(store: ObservableStore, now: number): number {
+		const ttls = [...store.cache.values()]
+			.map(entry => JSON.parse(entry.value))
+			.filter(parsed => parsed?.value?.provider === "anthropic")
+			.map(parsed => parsed.expiresAt - now);
+		if (ttls.length !== 1) throw new Error(`expected one anthropic cache entry, got ${ttls.length}`);
+		return ttls[0]!;
+	}
+
+	async function setup(rateLimitHeaders: Record<string, string> = {}) {
+		const store = makeStore([oauthRow(1, "a@example.com")]);
+		const usageFetch = Object.assign(
+			() => Promise.resolve(new Response("", { status: 429, headers: rateLimitHeaders })),
+			{ preconnect: fetch.preconnect },
+		);
+		const storage = new AuthStorage(store, {
+			usageFetch,
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+		});
+		await storage.reload();
+		const state = { now: Date.now(), used: 10, rateLimited: false, calls: 0 };
+		vi.spyOn(Date, "now").mockImplementation(() => state.now);
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async (_params, ctx) => {
+			state.calls += 1;
+			if (state.rateLimited) {
+				await ctx.fetch("https://api.anthropic.com/api/oauth/usage");
+				return null;
+			}
+			const report = makeReport("a@example.com");
+			report.limits[0]!.amount = { used: state.used, limit: 100, usedFraction: state.used / 100, unit: "percent" };
+			return report;
+		});
+		const poll = async (minutesLater: number) => {
+			// Date.now is mocked, so cache entries expire as this clock passes them.
+			state.now += minutesLater * 60_000;
+			const report = requireAnthropicReport(await storage.fetchUsageReports());
+			return { used: requireLimit(report, "anthropic:5h").amount.used, ttl: anthropicTtlMs(store, state.now) };
+		};
+		return { storage, state, poll };
+	}
+
+	const isIdle = (ttl: number) => ttl > 3.5 * 60_000 && ttl < 6.5 * 60_000;
+	const isActive = (ttl: number) => ttl > 40_000 && ttl < 80_000;
+
+	it("waits at least five minutes after a 429 and keeps the default TTL for 30 minutes after it", async () => {
+		const { storage, state, poll } = await setup();
+		try {
+			await poll(0);
+			state.used = 12;
+			expect(isActive((await poll(7)).ttl)).toBe(true);
+
+			// 429: serve last good, and do not ask again for ~5 minutes (not 10 s).
+			state.rateLimited = true;
+			const limited = await poll(2);
+			expect(limited.used).toBe(12);
+			expect(limited.ttl).toBeGreaterThanOrEqual(5 * 60_000 - 1);
+			const callsAfter429 = state.calls;
+			await poll(1);
+			await poll(2);
+			expect(state.calls).toBe(callsAfter429);
+
+			// Recovered and moving, but within 30 minutes of the 429: default TTL.
+			state.rateLimited = false;
+			state.used = 14;
+			const recovered = await poll(3);
+			expect(recovered.used).toBe(14);
+			expect(isIdle(recovered.ttl)).toBe(true);
+
+			// Over 30 minutes after the 429 and still moving: one-minute refresh again.
+			state.used = 16;
+			expect(isActive((await poll(25)).ttl)).toBe(true);
+		} finally {
+			storage.close();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("honors a Retry-After longer than the default back-off", async () => {
+		const { storage, state, poll } = await setup({ "retry-after": "900" });
+		try {
+			await poll(0);
+			state.rateLimited = true;
+			const limited = await poll(7);
+			expect(limited.ttl).toBeGreaterThanOrEqual(15 * 60_000 - 1);
+			expect(limited.ttl).toBeLessThanOrEqual(15 * 60_000);
+		} finally {
+			storage.close();
+			vi.restoreAllMocks();
+		}
+	});
+});

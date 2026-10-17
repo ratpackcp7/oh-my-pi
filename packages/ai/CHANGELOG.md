@@ -6,6 +6,7 @@
 - Claude usage refreshes every minute while the session or weekly percentage is moving, and every five minutes once it has been still for ten minutes.
 
 ### Fixed
+- A usage fetch answered with 429 now waits at least five minutes (or until `Retry-After`) before trying again, instead of 10 seconds, and Claude's one-minute refresh pauses for 30 minutes after a 429.
 - Broker client-observed usage now aggregates in fixed epoch-aligned five-minute buckets, preventing usage across bucket and calendar-day boundaries from being merged.
 - Meta Muse subscription usage rejects snapshots with missing or unparsable `resets_at` timestamps so malformed events cannot replace authoritative exhausted limits.
 - Meta Muse subscription usage now resolves broker OAuth credentials by hashed identity material (skipping remote refresh sentinels) and retains each subscription limit until its own provider-reported reset instead of failing open after one minute.
