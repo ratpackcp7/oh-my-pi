@@ -458,6 +458,12 @@ export interface UsageProvider {
 	 * exists. Once expired, normal cache failure handling drops the observation.
 	 */
 	headerReportTtlMs?: number;
+	/**
+	 * Shorter lifetime for polled reports while usage is moving. After a fetch
+	 * whose limits differ from the previous report, reports expire after this
+	 * (instead of the default 5-minute TTL) until usage has been still for a while.
+	 */
+	activeReportTtlMs?: number;
 	/** True when usage exists only in normal-response headers and must never be actively polled. */
 	pollingDisabled?: boolean;
 }
