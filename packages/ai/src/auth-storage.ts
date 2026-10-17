@@ -716,6 +716,19 @@ const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
  */
 const USAGE_FAILURE_BACKOFF_MS = 10_000;
 /**
+ * How long a credential counts as active after its polled usage last changed.
+ * While active, providers with `activeReportTtlMs` refresh on that shorter TTL.
+ */
+const USAGE_ACTIVE_WINDOW_MS = 10 * 60_000;
+
+/** True when any limit's used amount differs between two reports, or a limit appeared or went away. */
+function usageLimitsChanged(prior: UsageReport, next: UsageReport): boolean {
+	const usedOf = (limit: UsageLimit) => limit.amount.usedFraction ?? limit.amount.used;
+	const priorUsed = new Map(prior.limits.map(limit => [limit.id, usedOf(limit)]));
+	if (priorUsed.size !== next.limits.length) return true;
+	return next.limits.some(limit => !priorUsed.has(limit.id) || priorUsed.get(limit.id) !== usedOf(limit));
+}
+/**
  * A manual invalidation persists across the next CLI process and serializes
  * same-provider probes, avoiding a cold-account burst against IP-limited
  * upstream usage endpoints.
@@ -1367,6 +1380,8 @@ export class AuthStorage {
 	#usageCache: UsageCache;
 	#usageCacheEpoch = 0;
 	#usageRequestInFlight: Map<string, Promise<UsageReport | null>> = new Map();
+	/** Cache key → time until which its usage counts as moving (see USAGE_ACTIVE_WINDOW_MS). */
+	#usageActiveUntil: Map<string, number> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	/** Per-provider usage-fetch telemetry (see {@link AuthStorage.getUsageHealth}); in-memory only, not persisted. */
@@ -3554,14 +3569,15 @@ export class AuthStorage {
 		const promise = (async () => {
 			const report = await this.#fetchUsageUncached(request, timeoutMs);
 			if (usageCacheEpoch !== this.#usageCacheEpoch) return report;
-			const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
+			const ttlMs = report !== null ? this.#usageReportTtlMs(request, cacheKey, report) : USAGE_REPORT_TTL_MS;
+			const ttlJitter = ttlMs * (Math.random() * 0.5 - 0.25);
 			if (report !== null) {
 				// Success: stagger per-credential cache expiry so all accounts don't
 				// refresh in the same window — Anthropic / OpenAI rate-limit `/usage`
 				// per source IP regardless of account, and synchronized 5-credential
 				// fan-out trips 429s every cycle. With ±25% jitter on TTL the refresh
 				// times decorrelate within a few cycles.
-				this.#usageCache.set(cacheKey, { value: report, expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter });
+				this.#usageCache.set(cacheKey, { value: report, expiresAt: Date.now() + ttlMs + ttlJitter });
 				this.#recordUsageHistory(request, report);
 				this.#reconcileCodexUsageBlock(request, report);
 				return report;
@@ -3585,6 +3601,25 @@ export class AuthStorage {
 
 		this.#usageRequestInFlight.set(inFlightKey, promise);
 		return promise;
+	}
+	/**
+	 * Freshness TTL for a just-fetched report. Providers with `activeReportTtlMs`
+	 * use it while the report's limits keep changing from the last one cached
+	 * (usage is being spent), and the default TTL once they have been still for
+	 * USAGE_ACTIVE_WINDOW_MS. Must run before the new report is cached.
+	 */
+	#usageReportTtlMs(request: UsageRequestDescriptor, cacheKey: string, report: UsageReport): number {
+		const activeTtlMs = this.#resolveUsageProvider(request.provider)?.activeReportTtlMs;
+		if (activeTtlMs === undefined || !Number.isFinite(activeTtlMs) || activeTtlMs <= 0) return USAGE_REPORT_TTL_MS;
+		const now = Date.now();
+		const prior = this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value;
+		if (prior && usageLimitsChanged(prior, report)) {
+			this.#usageActiveUntil.set(cacheKey, now + USAGE_ACTIVE_WINDOW_MS);
+		}
+		const activeUntil = this.#usageActiveUntil.get(cacheKey);
+		if (activeUntil !== undefined && activeUntil > now) return Math.min(activeTtlMs, USAGE_REPORT_TTL_MS);
+		this.#usageActiveUntil.delete(cacheKey);
+		return USAGE_REPORT_TTL_MS;
 	}
 	/**
 	 * Append a freshly fetched report to durable usage history (when the store

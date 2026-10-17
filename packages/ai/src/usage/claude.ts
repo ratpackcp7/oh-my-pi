@@ -701,6 +701,10 @@ export const claudeUsageProvider: UsageProvider = {
 	fetchUsage: fetchClaudeUsage,
 	parseRateLimitHeaders: parseClaudeRateLimitHeaders,
 	supports: params => params.provider === "anthropic" && params.credential.type === "oauth",
+	// Refresh every minute while the session/week percentages move (one
+	// credential at 60 s stays well clear of the per-IP /usage limit); the
+	// default 5 minutes when idle.
+	activeReportTtlMs: 60_000,
 };
 
 function getClaudeModelKind(context: CredentialRankingContext | undefined): ClaudeModelKind | undefined {

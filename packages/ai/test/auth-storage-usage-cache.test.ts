@@ -1137,3 +1137,59 @@ describe("AuthStorage usage cache: org-only identity stability", () => {
 		}
 	});
 });
+
+describe("AuthStorage usage cache: active refresh", () => {
+	function freshTtlMs(store: ObservableStore, now: number): number {
+		const ttls = [...store.cache.values()]
+			.map(entry => JSON.parse(entry.value))
+			.filter(parsed => parsed?.value?.provider === "anthropic")
+			.map(parsed => parsed.expiresAt - now);
+		if (ttls.length !== 1) throw new Error(`expected one anthropic cache entry, got ${ttls.length}`);
+		return ttls[0]!;
+	}
+
+	function reportAt(used: number): UsageReport {
+		const report = makeReport("a@example.com");
+		report.limits[0]!.amount = { used, limit: 100, usedFraction: used / 100, unit: "percent" };
+		return report;
+	}
+
+	it("refreshes Claude usage every minute while it moves and every five minutes once it is still", async () => {
+		const store = makeStore([oauthRow(1, "a@example.com")]);
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+		});
+		await storage.reload();
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		let used = 10;
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => reportAt(used));
+		const poll = async (minutesLater: number) => {
+			now += minutesLater * 60_000;
+			expireCachePayloads(store);
+			const report = requireAnthropicReport(await storage.fetchUsageReports());
+			return { used: requireLimit(report, "anthropic:5h").amount.used, ttl: freshTtlMs(store, now) };
+		};
+		const isIdle = (ttl: number) => ttl > 3.5 * 60_000 && ttl < 6.5 * 60_000;
+		const isActive = (ttl: number) => ttl > 40_000 && ttl < 80_000;
+		try {
+			// First read and an unchanged one: idle cadence.
+			expect(isIdle((await poll(0)).ttl)).toBe(true);
+			expect(isIdle((await poll(5)).ttl)).toBe(true);
+
+			// Usage moved: one-minute cadence, kept while it is recent even if a
+			// one-minute read shows no new percent.
+			used = 12;
+			const moved = await poll(5);
+			expect(moved.used).toBe(12);
+			expect(isActive(moved.ttl)).toBe(true);
+			expect(isActive((await poll(1)).ttl)).toBe(true);
+
+			// Still for over ten minutes: back to five.
+			expect(isIdle((await poll(10)).ttl)).toBe(true);
+		} finally {
+			storage.close();
+			vi.restoreAllMocks();
+		}
+	});
+});

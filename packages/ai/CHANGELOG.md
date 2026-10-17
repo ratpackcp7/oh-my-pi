@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- Claude usage refreshes every minute while the session or weekly percentage is moving, and every five minutes once it has been still for ten minutes.
+
 ### Fixed
 - Broker client-observed usage now aggregates in fixed epoch-aligned five-minute buckets, preventing usage across bucket and calendar-day boundaries from being merged.
 - Meta Muse subscription usage rejects snapshots with missing or unparsable `resets_at` timestamps so malformed events cannot replace authoritative exhausted limits.
